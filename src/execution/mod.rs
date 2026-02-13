@@ -158,8 +158,9 @@ pub async fn execute<B: StorageBackend>(
     backend: &B,
     tx: &mut B::Tx,
     plan: LogicalPlan,
+    params: PropertyMap,
 ) -> Result<QueryResult> {
-    let mut ctx = ExecContext::new();
+    let mut ctx = ExecContext::with_params(params);
     let rows = execute_plan(backend, tx, &plan, &mut ctx).await?;
 
     let columns = ctx.columns.clone();
@@ -190,14 +191,13 @@ struct ExecContext {
 }
 
 impl ExecContext {
-    fn new() -> Self {
+    fn with_params(params: PropertyMap) -> Self {
         Self {
             columns: Vec::new(),
             stats: ExecutionStats::default(),
-            params: PropertyMap::new(),
+            params,
         }
     }
-
 }
 
 // ============================================================================
@@ -258,28 +258,26 @@ fn execute_plan<'a, B: StorageBackend>(
             Ok(rows)
         }
 
-        LogicalPlan::Expand { from, dir, rel_types, to, rel_alias } => {
-            // Expand expects input rows with `from` variable already bound.
-            // For now, scan all nodes with the `from` binding — the planner
-            // should chain this after a NodeScan.
-            // This is a placeholder; real execution would pipe rows through.
-            let all_nodes = backend.all_nodes(tx).await?;
+        LogicalPlan::Expand { input, from, dir, rel_types, to, rel_alias } => {
+            // Execute input pipeline first to get rows with 'from' variable bound
+            let input_rows = execute_plan(backend, tx, input, ctx).await?;
             let mut rows = Vec::new();
-            for node in &all_nodes {
-                let rels = backend.get_relationships(tx, node.id, *dir, None).await?;
-                for rel in rels {
-                    if !rel_types.is_empty() && !rel_types.contains(&rel.rel_type) {
-                        continue;
-                    }
-                    let other_id = if rel.src == node.id { rel.dst } else { rel.src };
-                    if let Some(other) = backend.get_node(tx, other_id).await? {
-                        let mut row = HashMap::new();
-                        row.insert(from.clone(), Value::Node(Box::new(node.clone())));
-                        row.insert(to.clone(), Value::Node(Box::new(other)));
-                        if let Some(ra) = rel_alias {
-                            row.insert(ra.clone(), Value::Relationship(Box::new(rel.clone())));
+            for input_row in &input_rows {
+                if let Some(Value::Node(from_node)) = input_row.get(from) {
+                    let rels = backend.get_relationships(tx, from_node.id, *dir, None).await?;
+                    for rel in rels {
+                        if !rel_types.is_empty() && !rel_types.contains(&rel.rel_type) {
+                            continue;
                         }
-                        rows.push(row);
+                        let other_id = if rel.src == from_node.id { rel.dst } else { rel.src };
+                        if let Some(other) = backend.get_node(tx, other_id).await? {
+                            let mut row = input_row.clone();
+                            row.insert(to.clone(), Value::Node(Box::new(other)));
+                            if let Some(ra) = rel_alias {
+                                row.insert(ra.clone(), Value::Relationship(Box::new(rel.clone())));
+                            }
+                            rows.push(row);
+                        }
                     }
                 }
             }
@@ -534,6 +532,30 @@ fn execute_plan<'a, B: StorageBackend>(
                 ctx.columns.push(alias.clone());
             }
             Ok(result)
+        }
+        LogicalPlan::RemoveProperty { input, variable, key } => {
+            let rows = execute_plan(backend, tx, input, ctx).await?;
+            for row in &rows {
+                if let Some(Value::Node(n)) = row.get(variable) {
+                    backend.set_node_property(tx, n.id, key, Value::Null).await?;
+                    ctx.stats.properties_set += 1;
+                } else if let Some(Value::Relationship(r)) = row.get(variable) {
+                    backend.set_relationship_property(tx, r.id, key, Value::Null).await?;
+                    ctx.stats.properties_set += 1;
+                }
+            }
+            Ok(rows)
+        }
+
+        LogicalPlan::RemoveLabel { input, variable, label } => {
+            let rows = execute_plan(backend, tx, input, ctx).await?;
+            for row in &rows {
+                if let Some(Value::Node(n)) = row.get(variable) {
+                    backend.remove_label(tx, n.id, label).await?;
+                    ctx.stats.labels_removed += 1;
+                }
+            }
+            Ok(rows)
         }
     }
     }) // close Box::pin(async move { ... })

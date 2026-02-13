@@ -16,8 +16,8 @@ pub enum LogicalPlan {
     AllNodesScan { alias: String },
     /// Index-backed property lookup
     IndexLookup { label: String, property: String, alias: String },
-    /// Expand relationships from a node
-    Expand { from: String, dir: crate::model::Direction, rel_types: Vec<String>, to: String, rel_alias: Option<String> },
+    /// Expand relationships from a node (piped from input plan)
+    Expand { input: Box<LogicalPlan>, from: String, dir: crate::model::Direction, rel_types: Vec<String>, to: String, rel_alias: Option<String> },
     /// Filter rows by predicate
     Filter { input: Box<LogicalPlan>, predicate: Expr },
     /// Project columns
@@ -50,6 +50,10 @@ pub enum LogicalPlan {
     DeleteRel { input: Box<LogicalPlan>, variable: String },
     /// UNWIND list AS x
     Unwind { input: Box<LogicalPlan>, expr: Expr, alias: String },
+    /// REMOVE n.key (set property to NULL)
+    RemoveProperty { input: Box<LogicalPlan>, variable: String, key: String },
+    /// REMOVE n:Label
+    RemoveLabel { input: Box<LogicalPlan>, variable: String, label: String },
 }
 
 /// Create a logical plan from a parsed AST.
@@ -62,6 +66,7 @@ pub fn plan(ast: &Statement, params: &PropertyMap) -> Result<LogicalPlan> {
         Statement::Set(s) => plan_set(s),
         Statement::Merge(_) => Err(Error::PlanError("MERGE not yet implemented".into())),
         Statement::Schema(_) => Err(Error::PlanError("Schema commands not yet implemented in planner".into())),
+        Statement::Remove(r) => plan_remove(r),
     }
 }
 
@@ -77,6 +82,15 @@ fn plan_query(q: &Query) -> Result<LogicalPlan> {
             input: Box::new(current),
             predicate: where_expr.clone(),
         };
+    }
+
+    // Sort BEFORE projection so ORDER BY expressions can reference
+    // pre-projection variables (e.g. n.name, n.age). Neo4j semantics.
+    if let Some(ref order) = q.order_by {
+        let keys: Vec<(Expr, bool)> = order.iter()
+            .map(|o| (o.expr.clone(), o.ascending))
+            .collect();
+        current = LogicalPlan::Sort { input: Box::new(current), keys };
     }
 
     let (has_agg, group_by, aggregations, _plain) = classify_return_items(&q.return_clause);
@@ -100,13 +114,6 @@ fn plan_query(q: &Query) -> Result<LogicalPlan> {
 
     if q.return_clause.distinct {
         current = LogicalPlan::Distinct { input: Box::new(current) };
-    }
-
-    if let Some(ref order) = q.order_by {
-        let keys: Vec<(Expr, bool)> = order.iter()
-            .map(|o| (o.expr.clone(), o.ascending))
-            .collect();
-        current = LogicalPlan::Sort { input: Box::new(current), keys };
     }
 
     if let Some(ref skip_expr) = q.skip {
@@ -196,7 +203,9 @@ fn plan_pattern(pattern: &Pattern) -> Result<LogicalPlan> {
                     PatternDirection::Both => crate::model::Direction::Both,
                 };
 
+                let input = plan.take().unwrap_or(LogicalPlan::Argument);
                 plan = Some(LogicalPlan::Expand {
+                    input: Box::new(input),
                     from,
                     dir,
                     rel_types: rp.rel_types.clone(),
@@ -275,6 +284,53 @@ fn plan_delete(d: &DeleteClause) -> Result<LogicalPlan> {
             input: Box::new(current),
             variable: var.clone(),
             detach: d.detach,
+        };
+    }
+
+    Ok(current)
+}
+
+fn plan_remove(r: &RemoveClause) -> Result<LogicalPlan> {
+    let mut current = if r.matches.is_empty() {
+        LogicalPlan::Argument
+    } else {
+        plan_matches(&r.matches)?
+    };
+
+    if let Some(ref where_expr) = r.where_clause {
+        current = LogicalPlan::Filter {
+            input: Box::new(current),
+            predicate: where_expr.clone(),
+        };
+    }
+
+    for item in &r.items {
+        match item {
+            RemoveItem::Property { variable, key } => {
+                current = LogicalPlan::RemoveProperty {
+                    input: Box::new(current),
+                    variable: variable.clone(),
+                    key: key.clone(),
+                };
+            }
+            RemoveItem::Label { variable, label } => {
+                current = LogicalPlan::RemoveLabel {
+                    input: Box::new(current),
+                    variable: variable.clone(),
+                    label: label.clone(),
+                };
+            }
+        }
+    }
+
+    if let Some(ref ret) = r.return_clause {
+        let items: Vec<(Expr, String)> = ret.items.iter().map(|item| {
+            let alias = item.alias.clone().unwrap_or_else(|| expr_default_alias(&item.expr));
+            (item.expr.clone(), alias)
+        }).collect();
+        current = LogicalPlan::Project {
+            input: Box::new(current),
+            items,
         };
     }
 
