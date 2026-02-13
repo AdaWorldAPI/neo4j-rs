@@ -17,6 +17,8 @@ impl std::fmt::Display for NodeId {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub id: NodeId,
+    /// Neo4j 5.x stable element identifier (e.g. `"4:abc:123"`).
+    pub element_id: Option<String>,
     pub labels: Vec<String>,
     pub properties: PropertyMap,
 }
@@ -25,6 +27,7 @@ impl Node {
     pub fn new(id: NodeId) -> Self {
         Self {
             id,
+            element_id: None,
             labels: Vec::new(),
             properties: PropertyMap::new(),
         }

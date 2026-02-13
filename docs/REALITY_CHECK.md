@@ -797,6 +797,9 @@ Fix every failing test. This is the definitive proof of correctness.
 | **Bolt protocol** | 400-600 | External Neo4j |
 | **LadybugBackend** | 800-1200 | ladybug-rs integration |
 | **openCypher TCK** | ongoing | Correctness proof |
+| **ExplicitTx Drop guard** | 50 | Safety |
+| **element_id on Node/Rel** | 20 | Bolt compat |
+| **Value From impls** | 40 | Ergonomics |
 
 ### Showstopper Status
 
@@ -806,14 +809,15 @@ Fix every failing test. This is the definitive proof of correctness.
 | S-2 | Planner returns error | **FIXED** — 380-line AST→LogicalPlan converter |
 | S-3 | Execution engine returns error | **FIXED** — full plan walker with expression eval |
 | S-4 | execute() type mismatch | **FIXED** — `&mut B::Tx` throughout |
-| S-5 | ExplicitTx no Drop | OPEN — needs committed flag + warning |
+| S-5 | ExplicitTx no Drop | IN PROGRESS — committed flag + Drop warning being implemented |
 
 ### Estimated Total Work to "Holy Grail"
 
 ```
 Done:           ~4,900 lines, 33+ tests
-Remaining:      ~2,200-3,200 lines, ~100+ tests
-Completion:     ~60-70% by line count
+Remaining:      ~2,310-3,310 lines, ~100+ tests
+  (includes +110 lines for ExplicitTx Drop guard, element_id, Value From impls)
+Completion:     ~60-68% by line count
                 ~50% by functionality (basic Cypher runs!)
 ```
 

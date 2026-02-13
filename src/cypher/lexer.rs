@@ -66,6 +66,30 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             // Skip whitespace
             c if c.is_whitespace() => { chars.next(); }
 
+            // Skip block comments /* ... */
+            '/' if matches!(chars.clone().nth(1), Some((_, '*'))) => {
+                let comment_start = pos;
+                chars.next(); // skip '/'
+                chars.next(); // skip '*'
+                loop {
+                    match chars.next() {
+                        Some((_, '*')) => {
+                            if matches!(chars.peek(), Some(&(_, '/'))) {
+                                chars.next(); // skip '/'
+                                break;
+                            }
+                        }
+                        Some(_) => {}
+                        None => {
+                            return Err(Error::SyntaxError {
+                                position: comment_start,
+                                message: "Unterminated block comment".into(),
+                            });
+                        }
+                    }
+                }
+            }
+
             // Skip line comments
             '/' if matches!(chars.clone().nth(1), Some((_, '/'))) => {
                 while chars.peek().map_or(false, |&(_, c)| c != '\n') {
@@ -377,5 +401,35 @@ mod tests {
         let tokens = tokenize("$name").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::Parameter);
         assert_eq!(tokens[0].text, "name");
+    }
+
+    #[test]
+    fn test_block_comment() {
+        let tokens = tokenize("MATCH /* this is a comment */ (n) RETURN n").unwrap();
+        // Should have: MATCH, (, Ident("n"), ), RETURN, Ident("n"), Eof
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(kinds[0], &TokenKind::Match);
+        assert_eq!(kinds[1], &TokenKind::LParen);
+    }
+
+    #[test]
+    fn test_block_comment_multiline() {
+        let tokens = tokenize("MATCH /* multi\nline\ncomment */ (n)").unwrap();
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::Match));
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::LParen));
+    }
+
+    #[test]
+    fn test_unterminated_block_comment() {
+        let result = tokenize("MATCH /* unterminated");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parameter_span() {
+        let tokens = tokenize("$myParam").unwrap();
+        let param_token = &tokens[0];
+        assert_eq!(param_token.span.start, 0);
+        assert_eq!(param_token.span.end, 8); // $ + myParam = 8 chars
     }
 }

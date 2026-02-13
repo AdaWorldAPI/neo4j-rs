@@ -277,14 +277,14 @@ What to borrow:
 | Public API (`Graph<B>`) | `src/lib.rs` | Complete |
 | Error types | `src/lib.rs` | Complete |
 | Node, Relationship, Path DTOs | `src/model/` | Complete |
-| Value enum (17 variants) | `src/model/value.rs` | Complete |
+| Value enum (18 variants) | `src/model/value.rs` | Complete |
 | PropertyMap | `src/model/property_map.rs` | Complete |
 | Cypher lexer | `src/cypher/lexer.rs` | Complete, tested |
 | Cypher AST types | `src/cypher/ast.rs` | Complete |
-| StorageBackend trait (v2) | `src/storage/mod.rs` | Complete — 11 new methods (8 Tier 1 + 3 Tier 2) |
+| StorageBackend trait (v2) | `src/storage/mod.rs` | Complete for CRUD, missing range scans and aggregation push-down — 11 new methods (8 Tier 1 + 3 Tier 2) |
 | ConstraintType, BackendCapabilities | `src/storage/mod.rs` | Complete |
 | ProcedureResult | `src/storage/mod.rs` | Complete |
-| MemoryBackend | `src/storage/memory.rs` | Complete, tested (8 tests) |
+| MemoryBackend | `src/storage/memory.rs` | CRUD working, 8 unit tests. No transaction atomicity, no concurrent access tests, no rollback tests. Single-writer only. |
 | Transaction types | `src/tx/mod.rs` | Complete |
 | Index types | `src/index/mod.rs` | Complete |
 
@@ -468,7 +468,7 @@ Pure data types. No behavior beyond `From` conversions and comparison.
 - **`Node`** — `{ id: NodeId, labels: Vec<String>, properties: PropertyMap }`
 - **`Relationship`** — `{ id: RelId, src: NodeId, dst: NodeId, rel_type: String, properties: PropertyMap }`
 - **`Path`** — Sequence of alternating nodes and relationships
-- **`Value`** — 17-variant enum covering Neo4j's full type system (Null, Bool, Int, Float, String, Bytes, List, Map, Node, Relationship, Path, Date, Time, DateTime, LocalDateTime, Duration, Point2D, Point3D)
+- **`Value`** — 18-variant enum covering Neo4j's full type system (Null, Bool, Int, Float, String, Bytes, List, Map, Node, Relationship, Path, Date, Time, DateTime, LocalDateTime, Duration, Point2D, Point3D)
 - **`PropertyMap`** — `HashMap<String, Value>`
 - **`NodeId` / `RelId`** — Newtype wrappers around `u64`
 - **`Direction`** — `Outgoing | Incoming | Both`
@@ -934,7 +934,7 @@ measured against the openCypher TCK. It must remain 100% truthful to:
 | Node model | `{id, labels[], properties{}}` |
 | Relationship model | `{id, src, dst, type, properties{}}` |
 | Path model | Alternating Node-Rel-Node sequences |
-| ACID transactions | BEGIN/COMMIT/ROLLBACK with isolation |
+| ACID transactions | BEGIN/COMMIT/ROLLBACK with isolation (target: Bolt backend provides real ACID; MemoryBackend has no atomicity, no isolation, no durability — consistency only. See [REALITY_CHECK.md](REALITY_CHECK.md) for details.) |
 | NULL semantics | Three-valued logic (NULL ≠ false) |
 | Index types | BTree, FullText, Unique |
 | Bolt protocol | Wire-compatible with Neo4j 4.x/5.x |
@@ -1491,7 +1491,7 @@ async fn smoke_test_ladybug_backend() {
 **neo4j-rs promises:**
 - 100% openCypher compatible Cypher parser
 - Full property graph model (Node, Rel, Path, Value)
-- ACID transactions
+- Transaction API (BEGIN/COMMIT/ROLLBACK). **Note:** MemoryBackend has no atomicity, no isolation, no durability. Consistency only. Real ACID requires the Bolt backend (external Neo4j) or future MVCC implementation. See [REALITY_CHECK.md](REALITY_CHECK.md) for details.
 - StorageBackend trait with 11 new methods (all backward compatible except `all_nodes`)
 - `ConstraintType`, `BackendCapabilities`, `ProcedureResult` supporting types
 - `CallProcedure` variant in `LogicalPlan`

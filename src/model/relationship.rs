@@ -25,6 +25,8 @@ pub enum Direction {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Relationship {
     pub id: RelId,
+    /// Neo4j 5.x stable element identifier (e.g. `"5:abc:456"`).
+    pub element_id: Option<String>,
     pub src: NodeId,
     pub dst: NodeId,
     pub rel_type: String,
@@ -35,6 +37,7 @@ impl Relationship {
     pub fn new(id: RelId, src: NodeId, dst: NodeId, rel_type: impl Into<String>) -> Self {
         Self {
             id,
+            element_id: None,
             src,
             dst,
             rel_type: rel_type.into(),

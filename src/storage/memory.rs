@@ -1,9 +1,19 @@
 //! In-memory storage backend.
 //!
 //! This is the reference implementation of `StorageBackend`.
-//! It uses simple HashMaps protected by RwLock. Not production storage,
-//! but essential for:
-//! - Testing the Cypher parser and planner
+//! It uses simple HashMaps protected by RwLock.
+//!
+//! ## Limitations
+//!
+//! - **No real transactions**: `commit_tx()` and `rollback_tx()` are no-ops.
+//!   Writes are applied immediately. Rollback does NOT undo mutations.
+//! - **Single-writer only**: Per-collection locks mean multi-step mutations
+//!   are NOT atomic. Safe for single-threaded or read-heavy use only.
+//! - **No property indexes**: `create_index()` is a no-op. All property
+//!   lookups do a full scan.
+//!
+//! Use this backend for:
+//! - Testing the Cypher parser, planner, and execution engine
 //! - Embedding neo4j-rs in applications that don't need persistence
 //! - Validating correctness before running against ladybug-rs or Neo4j
 
@@ -86,7 +96,11 @@ impl StorageBackend for MemoryBackend {
         Ok(MemoryTx { id, mode })
     }
 
+    /// No-op: memory backend applies writes immediately, not on commit.
     async fn commit_tx(&self, _tx: MemoryTx) -> Result<()> { Ok(()) }
+
+    /// WARNING: No-op. Memory backend has no write-ahead log.
+    /// Mutations applied during this transaction are NOT reverted.
     async fn rollback_tx(&self, _tx: MemoryTx) -> Result<()> { Ok(()) }
 
     // ========================================================================
@@ -102,6 +116,7 @@ impl StorageBackend for MemoryBackend {
         let id = NodeId(self.inner.next_node_id.fetch_add(1, Ordering::Relaxed));
         let node = Node {
             id,
+            element_id: None,
             labels: labels.iter().map(|l| l.to_string()).collect(),
             properties: props,
         };
@@ -226,6 +241,7 @@ impl StorageBackend for MemoryBackend {
         let id = RelId(self.inner.next_rel_id.fetch_add(1, Ordering::Relaxed));
         let rel = Relationship {
             id,
+            element_id: None,
             src,
             dst,
             rel_type: rel_type.to_string(),
@@ -395,7 +411,7 @@ impl StorageBackend for MemoryBackend {
     // ========================================================================
 
     async fn create_index(&self, _label: &str, _property: &str, _index_type: IndexType) -> Result<()> {
-        // Memory backend always has implicit indexes
+        // No-op: memory backend always full-scans. No real indexes are maintained.
         Ok(())
     }
 
