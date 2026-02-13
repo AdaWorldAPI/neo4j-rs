@@ -129,7 +129,8 @@ pub trait StorageBackend: Send + Sync + 'static {
     type Tx: Transaction;
 
     // === Lifecycle ===
-    async fn connect(config: &BackendConfig) -> Result<Self> where Self: Sized;
+    // NOTE: connect() is NOT a trait method. Each backend provides its own
+    // associated function (e.g., MemoryBackend::new(), BoltBackend::connect()).
     async fn shutdown(&self) -> Result<()>;
 
     // === Transactions ===
@@ -169,6 +170,7 @@ pub trait StorageBackend: Send + Sync + 'static {
     async fn relationship_types(&self, tx: &Self::Tx) -> Result<Vec<String>>;
 
     // === Query (escape hatch for native queries) ===
+    // Default returns Error::ExecutionError("not supported"). Bolt overrides.
     async fn execute_raw(&self, tx: &Self::Tx, query: &str, params: ParamMap) -> Result<QueryResult>;
 }
 

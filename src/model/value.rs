@@ -139,6 +139,20 @@ impl<T: Into<Value>> From<Option<T>> for Value {
     fn from(v: Option<T>) -> Self { v.map(Into::into).unwrap_or(Value::Null) }
 }
 
+impl From<Vec<u8>> for Value { fn from(v: Vec<u8>) -> Self { Value::Bytes(v) } }
+impl From<HashMap<String, Value>> for Value { fn from(v: HashMap<String, Value>) -> Self { Value::Map(v) } }
+impl From<Node> for Value { fn from(v: Node) -> Self { Value::Node(Box::new(v)) } }
+impl From<Relationship> for Value { fn from(v: Relationship) -> Self { Value::Relationship(Box::new(v)) } }
+impl From<Path> for Value { fn from(v: Path) -> Self { Value::Path(Box::new(v)) } }
+impl From<NaiveDate> for Value { fn from(v: NaiveDate) -> Self { Value::Date(v) } }
+impl From<NaiveTime> for Value { fn from(v: NaiveTime) -> Self { Value::Time(v) } }
+impl From<DateTime<Utc>> for Value { fn from(v: DateTime<Utc>) -> Self { Value::DateTime(v) } }
+impl From<NaiveDateTime> for Value { fn from(v: NaiveDateTime) -> Self { Value::LocalDateTime(v) } }
+impl From<IsoDuration> for Value { fn from(v: IsoDuration) -> Self { Value::Duration(v) } }
+impl From<u32> for Value { fn from(v: u32) -> Self { Value::Int(v as i64) } }
+impl From<u64> for Value { fn from(v: u64) -> Self { Value::Int(v as i64) } }
+impl From<usize> for Value { fn from(v: usize) -> Self { Value::Int(v as i64) } }
+
 // ============================================================================
 // Display
 // ============================================================================
@@ -227,5 +241,17 @@ mod tests {
             Value::Int(1).neo4j_cmp(&Value::Float(1.5)),
             Some(std::cmp::Ordering::Less)
         );
+    }
+
+    #[test]
+    fn test_value_from_bytes() {
+        assert_eq!(Value::from(vec![1u8, 2, 3]), Value::Bytes(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn test_value_from_map() {
+        let mut m = HashMap::new();
+        m.insert("key".to_string(), Value::Int(42));
+        assert_eq!(Value::from(m.clone()), Value::Map(m));
     }
 }

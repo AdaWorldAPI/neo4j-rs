@@ -141,7 +141,7 @@ impl<B: StorageBackend> Graph<B> {
     /// Begin an explicit transaction.
     pub async fn begin(&self, mode: TxMode) -> Result<ExplicitTx<'_, B>> {
         let tx = self.backend.begin_tx(mode).await?;
-        Ok(ExplicitTx { graph: self, tx })
+        Ok(ExplicitTx { graph: self, tx: Some(tx) })
     }
 
     /// Access the underlying backend (for advanced use).
@@ -158,10 +158,10 @@ impl Graph<storage::MemoryBackend> {
     }
 }
 
-/// Explicit transaction handle with auto-rollback on drop.
+/// Explicit transaction handle. Warns on drop without commit/rollback.
 pub struct ExplicitTx<'g, B: StorageBackend> {
     graph: &'g Graph<B>,
-    tx: B::Tx,
+    tx: Option<B::Tx>,
 }
 
 impl<'g, B: StorageBackend> ExplicitTx<'g, B> {
@@ -172,15 +172,29 @@ impl<'g, B: StorageBackend> ExplicitTx<'g, B> {
         let ast = cypher::parse(query)?;
         let logical = planner::plan(&ast, &params.into())?;
         let optimized = planner::optimize(logical)?;
-        execution::execute(&self.graph.backend, &mut self.tx, optimized).await
+        let tx = self.tx.as_mut().ok_or_else(|| Error::TxError("Transaction already finished".into()))?;
+        execution::execute(&self.graph.backend, tx, optimized).await
     }
 
-    pub async fn commit(self) -> Result<()> {
-        self.graph.backend.commit_tx(self.tx).await
+    pub async fn commit(mut self) -> Result<()> {
+        let tx = self.tx.take().ok_or_else(|| Error::TxError("Transaction already finished".into()))?;
+        self.graph.backend.commit_tx(tx).await
     }
 
-    pub async fn rollback(self) -> Result<()> {
-        self.graph.backend.rollback_tx(self.tx).await
+    pub async fn rollback(mut self) -> Result<()> {
+        let tx = self.tx.take().ok_or_else(|| Error::TxError("Transaction already finished".into()))?;
+        self.graph.backend.rollback_tx(tx).await
+    }
+}
+
+impl<'g, B: StorageBackend> Drop for ExplicitTx<'g, B> {
+    fn drop(&mut self) {
+        if self.tx.is_some() {
+            tracing::warn!(
+                "ExplicitTx dropped without commit or rollback — transaction abandoned. \
+                 Call .commit() or .rollback() explicitly."
+            );
+        }
     }
 }
 
