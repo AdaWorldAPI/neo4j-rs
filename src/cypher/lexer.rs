@@ -30,6 +30,7 @@ pub enum TokenKind {
     StartsWith, EndsWith, Contains,
     OnCreate, OnMatch,
     Index, Constraint, Drop, On, For,
+    Call, Yield,
 
     // Literals
     Integer, Float, StringLiteral,
@@ -316,6 +317,8 @@ fn keyword_or_ident(s: &str) -> TokenKind {
         "DROP" => TokenKind::Drop,
         "ON" => TokenKind::On,
         "FOR" => TokenKind::For,
+        "CALL" => TokenKind::Call,
+        "YIELD" => TokenKind::Yield,
         _ => TokenKind::Identifier,
     }
 }

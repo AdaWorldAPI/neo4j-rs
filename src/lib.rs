@@ -12,19 +12,21 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use neo4j_rs::{Graph, Value};
+//! use neo4j_rs::{Graph, Node, Value, PropertyMap};
 //!
 //! # async fn example() -> neo4j_rs::Result<()> {
 //! // Connect to storage backend
 //! let graph = Graph::open_memory().await?;
 //!
 //! // Execute Cypher
+//! let mut params = PropertyMap::new();
+//! params.insert("name".into(), Value::from("Ada"));
 //! let result = graph.execute(
 //!     "CREATE (n:Person {name: $name}) RETURN n",
-//!     [("name", Value::from("Ada"))],
+//!     params,
 //! ).await?;
 //!
-//! for row in result.rows() {
+//! for row in &result.rows {
 //!     println!("{:?}", row.get::<Node>("n")?);
 //! }
 //! # Ok(())
@@ -114,7 +116,7 @@ impl<B: StorageBackend> Graph<B> {
 
         // Phase 4: Execute
         let mut tx = self.backend.begin_tx(TxMode::ReadOnly).await?;
-        let result = execution::execute(&self.backend, &tx, optimized).await?;
+        let result = execution::execute(&self.backend, &mut tx, optimized).await?;
         self.backend.commit_tx(tx).await?;
 
         Ok(result)
@@ -163,14 +165,14 @@ pub struct ExplicitTx<'g, B: StorageBackend> {
 }
 
 impl<'g, B: StorageBackend> ExplicitTx<'g, B> {
-    pub async fn execute<P>(&self, query: &str, params: P) -> Result<QueryResult>
+    pub async fn execute<P>(&mut self, query: &str, params: P) -> Result<QueryResult>
     where
         P: Into<PropertyMap>,
     {
         let ast = cypher::parse(query)?;
         let logical = planner::plan(&ast, &params.into())?;
         let optimized = planner::optimize(logical)?;
-        execution::execute(&self.graph.backend, &self.tx, optimized).await
+        execution::execute(&self.graph.backend, &mut self.tx, optimized).await
     }
 
     pub async fn commit(self) -> Result<()> {
