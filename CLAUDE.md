@@ -154,6 +154,17 @@ Phase 4: ladybug-rs Integration
 - MVCC with snapshot isolation
 - We adapt this for graph: add Expand, VarLengthExpand, ShortestPath operators
 
+### CLAM/CAKES/panCAKES → academic foundation for fingerprint-based search
+- **https://github.com/URI-ABD/clam** — MIT-licensed Rust, 21★
+- **CAKES** (arXiv:2309.05491) — exact k-NN scaling with *fractal dimension*, not cardinality
+- **panCAKES** (arXiv:2409.12161) — search on compressed data without decompression (70x ratio)
+- **Directly validates our Hamming fingerprint approach**: their LFD = our pruning ratio
+- CLAM Tree + Bipolar Split = our FingerprintIndex structure
+- Their `Search` trait + `KnnBranch` greedy algorithm = our graph traversal via pruning
+- SIMD `distances` crate has Hamming, cosine, euclidean — plug directly into our metric
+- Theoretical guarantee: O(k · 2^LFD · log(n)), sublinear for real-world data
+- Their `DistanceValue` trait with blanket impl is cleaner than hand-rolling
+
 ## Coding Standards
 
 - **Edition 2024**, rust-version 1.88
