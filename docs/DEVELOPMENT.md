@@ -23,9 +23,10 @@
 11. [Feature Flags](#11-feature-flags)
 12. [Coding Conventions](#12-coding-conventions)
 13. [Ecosystem: What to Steal & Borrow](#13-ecosystem-what-to-steal--borrow)
-14. [What to Work On](#14-what-to-work-on)
-15. [Reference Resources](#15-reference-resources)
-16. [What NOT to Do](#16-what-not-to-do)
+14. [Integration Contract: neo4j-rs ↔ ladybug-rs](#14-integration-contract-neo4j-rs--ladybug-rs)
+15. [What to Work On](#15-what-to-work-on)
+16. [Reference Resources](#16-reference-resources)
+17. [What NOT to Do](#17-what-not-to-do)
 
 ---
 
@@ -488,7 +489,7 @@ EXISTS, IS NULL, label checks, string operations, and wildcards.
 
 **Parser** (`parser.rs`): Currently a stub. Needs a recursive descent parser
 that consumes `Vec<Token>` and produces `Statement`. See
-[What to Work On](#14-what-to-work-on).
+[What to Work On](#15-what-to-work-on).
 
 ### `src/planner/` — Logical Plan
 
@@ -903,7 +904,343 @@ The official driver has the most mature connection handling:
 
 ---
 
-## 14. What to Work On
+## 14. Integration Contract: neo4j-rs ↔ ladybug-rs
+
+This section defines what the `StorageBackend` trait needs to become so that
+ladybug-rs can implement it faithfully AND neo4j-rs remains 100% truthful to
+Neo4j 5.26.0 semantics.
+
+### The Orchestration Model
+
+```
+User Cypher → neo4j-rs (ALWAYS parses, plans, orchestrates)
+                 │
+                 ├── For each LogicalPlan operator:
+                 │     calls StorageBackend trait methods
+                 │
+                 ├── StorageBackend::Memory   → HashMap (test oracle)
+                 ├── StorageBackend::Bolt     → sends Cypher to real Neo4j
+                 └── StorageBackend::Ladybug  → calls ladybug-rs internals
+                                                   │
+                                                   ├── Lance tables (persistence)
+                                                   ├── BindSpace (16K fingerprints)
+                                                   ├── DN-Sparse CSR (adjacency)
+                                                   └── DataFusion (query engine)
+```
+
+neo4j-rs is **always** the orchestrator: it parses Cypher, builds the plan,
+and walks the plan tree making trait calls. Backends never see Cypher strings
+(except through `execute_raw()` escape hatch for Bolt passthrough).
+
+### Gap A: ARCHITECTURE.md Promises vs Actual Trait
+
+The ARCHITECTURE.md defines a trait with methods the actual `storage/mod.rs`
+**does not have yet**:
+
+| Method | In ARCHITECTURE.md | In storage/mod.rs | Status |
+|--------|-------------------|-------------------|--------|
+| `connect(config)` | Yes | No | **MISSING** — needed for LadybugBackend init (open Lance, warm cache) |
+| `execute_raw(tx, query, params)` | Yes | No | **MISSING** — escape hatch for Bolt passthrough & DataFusion pushdown |
+
+### Gap B: Neo4j 5.26.0 Operations the Trait Lacks
+
+Auditing the current 22 trait methods against the full Cypher statement types
+in `ast.rs` (Query, Create, Merge, Delete, Set, Schema) reveals these gaps:
+
+#### B1. Relationship Property CRUD (blocks `SET r.prop`, `REMOVE r.prop`)
+
+```rust
+// MISSING — needed for: SET r.weight = 0.5
+async fn set_relationship_property(&self, tx: &mut Self::Tx, id: RelId, key: &str, val: Value) -> Result<()>;
+
+// MISSING — needed for: REMOVE r.weight
+async fn remove_relationship_property(&self, tx: &mut Self::Tx, id: RelId, key: &str) -> Result<()>;
+```
+
+The AST has `SetItem::Property` which can target either nodes or relationships.
+The execution engine needs these methods to handle relationship writes.
+
+#### B2. DETACH DELETE (blocks `DETACH DELETE n`)
+
+```rust
+// MISSING — needed for: DETACH DELETE n (atomically delete node + all rels)
+async fn detach_delete_node(&self, tx: &mut Self::Tx, id: NodeId) -> Result<bool>;
+```
+
+The AST has `DeleteClause { detach: bool }`. Without this, the executor must
+manually enumerate and delete each relationship first — which is both slow on
+ladybug-rs (N individual Lance deletes vs one batch) and non-atomic.
+
+#### B3. MERGE / Upsert (blocks `MERGE (n:Person {name: 'Ada'})`)
+
+```rust
+// MISSING — needed for: MERGE (n:L {match_props}) ON CREATE SET ... ON MATCH SET ...
+async fn merge_node(
+    &self,
+    tx: &mut Self::Tx,
+    labels: &[&str],
+    match_props: PropertyMap,     // properties to match on
+    on_create: PropertyMap,        // properties to set if created
+    on_match: Vec<(&str, Value)>,  // properties to update if matched
+) -> Result<(NodeId, bool)>;       // (id, was_created)
+```
+
+The AST has `MergeClause { on_create, on_match }`. Without atomic merge,
+the executor composes `nodes_by_property()` + `create_node()`, but this has
+TOCTOU race conditions under concurrent writes. ladybug-rs with DataFusion
+can do atomic upserts in a single Lance operation.
+
+#### B4. Shortest Path (blocks `shortestPath()`, `allShortestPaths()`)
+
+```rust
+// MISSING — needed for: shortestPath((a)-[*]-(b))
+async fn shortest_path(
+    &self,
+    tx: &Self::Tx,
+    src: NodeId,
+    dst: NodeId,
+    dir: Direction,
+    rel_types: &[&str],
+    max_depth: Option<usize>,
+) -> Result<Option<Path>>;
+
+// MISSING — needed for: allShortestPaths((a)-[*]-(b))
+async fn all_shortest_paths(
+    &self,
+    tx: &Self::Tx,
+    src: NodeId,
+    dst: NodeId,
+    dir: Direction,
+    rel_types: &[&str],
+    max_depth: Option<usize>,
+) -> Result<Vec<Path>>;
+```
+
+The current `expand()` returns ALL paths to a depth — it doesn't find shortest
+paths between two specific endpoints. ladybug-rs can accelerate this massively
+via Hamming-guided BFS (HDR cascade prunes 90% of candidates).
+
+#### B5. Scan Gaps (blocks several MATCH patterns)
+
+```rust
+// MISSING — needed for: MATCH (n) RETURN n (no label filter)
+async fn all_nodes(&self, tx: &Self::Tx) -> Result<Vec<Node>>;
+
+// MISSING — needed for: MATCH ()-[r:KNOWS]->() RETURN r
+async fn relationships_by_type(&self, tx: &Self::Tx, rel_type: &str) -> Result<Vec<Relationship>>;
+
+// MISSING — needed for: WHERE n.age > 25 AND n.age < 65 (range predicates)
+async fn nodes_by_property_range(
+    &self,
+    tx: &Self::Tx,
+    label: &str,
+    key: &str,
+    min: Option<&Value>,  // None = unbounded lower
+    max: Option<&Value>,  // None = unbounded upper
+) -> Result<Vec<Node>>;
+```
+
+Range queries are critical. Currently `nodes_by_property()` only does exact
+equality on ONE property. Neo4j uses B-tree indexes for range scans. ladybug-rs
+would use DataFusion's filter pushdown.
+
+#### B6. Batch Operations (performance-critical for ladybug-rs)
+
+```rust
+// MISSING — needed for efficient plan execution with IN lists
+async fn get_nodes(&self, tx: &Self::Tx, ids: &[NodeId]) -> Result<Vec<Option<Node>>>;
+
+// MISSING — needed for bulk import / UNWIND
+async fn create_nodes_batch(
+    &self,
+    tx: &mut Self::Tx,
+    nodes: Vec<(&[&str], PropertyMap)>,  // (labels, props) per node
+) -> Result<Vec<NodeId>>;
+```
+
+For ladybug-rs this is the difference between 1 Lance read (batch) vs N
+individual reads. Lance is columnar — batch is 100-1000x faster.
+
+#### B7. Schema Constraints (blocks `CREATE CONSTRAINT`)
+
+```rust
+// MISSING — needed for: CREATE CONSTRAINT FOR (n:Person) REQUIRE n.email IS UNIQUE
+async fn create_constraint(
+    &self,
+    label: &str,
+    property: &str,
+    constraint_type: ConstraintType,
+) -> Result<()>;
+
+async fn drop_constraint(&self, label: &str, property: &str) -> Result<()>;
+
+async fn list_indexes(&self, tx: &Self::Tx) -> Result<Vec<IndexInfo>>;
+async fn list_constraints(&self, tx: &Self::Tx) -> Result<Vec<ConstraintInfo>>;
+```
+
+The AST already has `SchemaCommand::CreateConstraint` and `DropConstraint` —
+but the trait has no way to execute them. Neo4j 5.26.0 supports UNIQUE, NODE
+KEY, EXISTENCE, and RELATIONSHIP TYPE existence constraints.
+
+#### B8. Degree Counting (performance optimization)
+
+```rust
+// MISSING — needed for: size((n)-->()) without materializing all rels
+async fn degree(
+    &self,
+    tx: &Self::Tx,
+    node: NodeId,
+    dir: Direction,
+    rel_type: Option<&str>,
+) -> Result<u64>;
+```
+
+Currently `get_relationships()` returns all relationships just to count them.
+ladybug-rs can answer degree queries from DN-Sparse CSR metadata without
+touching Lance at all.
+
+### Gap C: What ladybug-rs Must Expose (the Integration Surface)
+
+For ladybug-rs to implement `StorageBackend`, it needs to provide:
+
+```
+ladybug-rs public API (what neo4j-rs imports):
+├── LadybugBackend          — struct implementing StorageBackend
+├── LadybugTx               — struct implementing Transaction
+├── LadybugConfig            — initialization config (data_dir, cache_size, etc.)
+└── Error conversions        — ladybug errors → neo4j-rs Error
+```
+
+#### What ladybug-rs must handle internally:
+
+| neo4j-rs Calls | ladybug-rs Translates To |
+|----------------|--------------------------|
+| `create_node(labels, props)` | Lance INSERT into nodes table + BindSpace fingerprint alloc |
+| `get_node(id)` | Lance point lookup + JSON→PropertyMap deserialize |
+| `get_nodes(ids)` | Lance batch read (single I/O, columnar) |
+| `nodes_by_label(label)` | DataFusion: `SELECT * FROM nodes WHERE labels @> [label]` |
+| `nodes_by_property(label, k, v)` | DataFusion: `SELECT * FROM nodes WHERE labels @> [label] AND json_extract(properties, k) = v` |
+| `nodes_by_property_range(...)` | DataFusion: `SELECT * ... WHERE json_extract(...) BETWEEN min AND max` |
+| `expand(node, dir, types, depth)` | Hamming-guided BFS on DN-Sparse + HDR cascade pruning |
+| `shortest_path(src, dst, ...)` | Hamming-guided bidirectional BFS (HDR cascade distance estimate) |
+| `create_index(label, prop, type)` | Lance: create secondary index; for Vector: IVF-PQ on fingerprints |
+| `merge_node(labels, match_props, ...)` | DataFusion: atomic INSERT ... ON CONFLICT via Lance transactions |
+| `detach_delete_node(id)` | Lance: batch delete from nodes + relationships WHERE src_id=id OR dst_id=id |
+| `execute_raw(query, params)` | DataFusion: run SQL directly (escape hatch) |
+| `begin_tx(mode)` | Lance: begin transaction (copy-on-write) |
+| `commit_tx(tx)` | Lance: commit version |
+
+#### What ladybug-rs must NOT expose:
+
+- BindSpace internals (16K fingerprint arrays)
+- DN-Sparse CSR format
+- HDR cascade levels
+- DataFusion execution details
+- holograph types
+
+All of these stay behind the `StorageBackend` trait boundary.
+
+### Gap D: Transaction Trait Needs Enrichment
+
+The current `Transaction` trait is too thin:
+
+```rust
+// Current — just mode + id
+pub trait Transaction: Send + Sync {
+    fn mode(&self) -> TxMode;
+    fn id(&self) -> TxId;
+}
+```
+
+For Neo4j 5.26.0 compatibility, it needs:
+
+```rust
+pub trait Transaction: Send + Sync {
+    fn mode(&self) -> TxMode;
+    fn id(&self) -> TxId;
+
+    // Causal consistency — Neo4j bookmarks
+    fn bookmark(&self) -> Option<&str>;
+
+    // Database targeting — Neo4j multi-tenancy
+    fn database(&self) -> Option<&str>;
+
+    // Timeout — prevent runaway queries
+    fn timeout(&self) -> Option<std::time::Duration>;
+}
+```
+
+ladybug-rs would use `bookmark()` for Lance version pinning (snapshot reads).
+Bolt would forward bookmarks to the Neo4j server. Memory can ignore them.
+
+### Gap E: Capability Negotiation
+
+Different backends support different features. The execution engine needs to
+know what it can push down vs what it must handle itself:
+
+```rust
+/// What a backend can handle natively.
+pub trait BackendCapabilities {
+    /// Can the backend handle filtered scans with arbitrary predicates?
+    fn supports_predicate_pushdown(&self) -> bool;
+
+    /// Can the backend handle shortestPath natively?
+    fn supports_shortest_path(&self) -> bool;
+
+    /// Can the backend handle aggregation (COUNT, SUM, etc.)?
+    fn supports_aggregation_pushdown(&self) -> bool;
+
+    /// Can the backend run raw queries? (Bolt: yes, Memory: no)
+    fn supports_raw_query(&self) -> bool;
+
+    /// Can the backend do atomic MERGE? (Ladybug: yes, Memory: no)
+    fn supports_atomic_merge(&self) -> bool;
+
+    /// Does the backend support vector similarity search?
+    fn supports_vector_search(&self) -> bool;
+}
+```
+
+The execution engine uses this to make optimization decisions:
+- Memory: handle everything in the executor (no pushdown)
+- Bolt: push entire query via `execute_raw()` (maximum pushdown)
+- Ladybug: push filtered scans and shortest paths, handle CASE/UNWIND in executor
+
+### Summary: Required Changes by Priority
+
+```
+MUST HAVE (blocks Cypher compliance):
+  ├── set_relationship_property()        — blocks SET on relationships
+  ├── remove_relationship_property()     — blocks REMOVE on relationships
+  ├── detach_delete_node()               — blocks DETACH DELETE
+  ├── all_nodes()                        — blocks MATCH (n) with no label
+  ├── relationships_by_type()            — blocks MATCH ()-[r:T]->()
+  ├── connect(config)                    — blocks any non-Memory backend init
+  ├── create_constraint() / drop_...     — blocks schema commands in AST
+  └── list_indexes() / list_constraints() — blocks SHOW INDEXES/CONSTRAINTS
+
+SHOULD HAVE (needed for faithful semantics):
+  ├── merge_node()                       — blocks MERGE (compositional fallback exists)
+  ├── shortest_path() / all_...          — blocks shortestPath() function
+  ├── nodes_by_property_range()          — blocks WHERE n.age > 25
+  ├── execute_raw()                      — blocks Bolt passthrough
+  ├── Transaction::bookmark()            — blocks causal consistency
+  └── Transaction::database()            — blocks multi-tenancy
+
+NICE TO HAVE (performance, ladybug-rs benefits massively):
+  ├── get_nodes() (batch)                — 100-1000x for ladybug-rs
+  ├── create_nodes_batch()               — bulk import
+  ├── degree()                           — avoid materializing rels
+  └── BackendCapabilities trait          — optimizer decisions
+```
+
+---
+
+## 15. What to Work On
+
+> **Note**: Section 14 above identifies trait gaps that must be addressed.
+> Factor these into the priorities below — specifically, the "MUST HAVE" items
+> from Gap B should be implemented alongside the execution engine (Priority 3).
 
 ### Phase 1 Priorities (Current Focus)
 
@@ -996,7 +1333,7 @@ P3 (future):
 
 ---
 
-## 15. Reference Resources
+## 16. Reference Resources
 
 ### Authoritative
 
@@ -1025,7 +1362,7 @@ See [docs/INSPIRATION.md](INSPIRATION.md) for the full deep-dive analysis.
 
 ---
 
-## 16. What NOT to Do
+## 17. What NOT to Do
 
 - Do NOT add `holograph` as a direct dependency
 - Do NOT add `arrow` or `datafusion` to the default feature set
