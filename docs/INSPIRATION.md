@@ -213,26 +213,176 @@ transactions.rs           — Transaction lifecycle
 
 ---
 
+---
+
+## 8. STEAL: CLAM/CAKES/panCAKES — Entropy-Scaling Search (from URI-ABD/clam)
+
+**This is the academic foundation for what ladybug-rs does intuitively.**
+
+CLAM (Clustering, Learning and Approximation of Manifolds) is a Rust library
+from URI's Algorithms for Big Data lab that solves the *exact same problem*
+we're attacking: nearest-neighbor search that doesn't scale with dataset size
+or embedding dimension, but with the **intrinsic geometry** of the data.
+
+### Three papers, one architecture:
+
+| Paper | arXiv | Core Insight |
+|-------|-------|-------------|
+| **CAKES** | 2309.05491 | Exact k-NN that scales with *fractal dimension*, not cardinality |
+| **panCAKES** | 2409.12161 | Search on **compressed** data without full decompression |
+| **CHESS** | 1908.08551 | Original ranged NN search via divisive hierarchical clustering |
+
+### The CLAM Tree — what it is
+
+A divisive hierarchical clustering that partitions a metric space into a binary
+tree. Each `Cluster` node stores:
+
+```rust
+pub struct Cluster<T, A> {
+    depth: usize,           // tree depth
+    center_index: usize,    // index of representative point
+    cardinality: usize,     // points in subtree
+    radius: T,              // max distance from center to any point
+    lfd: f64,               // LOCAL FRACTAL DIMENSION — key insight
+    children: Option<(Box<[usize]>, T)>,  // child centers + span
+    annotation: A,          // arbitrary metadata
+}
+```
+
+The partitioning is **bipolar split**: pick two poles (the farthest points),
+assign each item to the closer pole. This is essentially the same as what
+ladybug-rs does when it builds a Hamming tree — but CLAM proves it formally.
+
+### Why CLAM matters for neo4j-rs + ladybug-rs
+
+**1. Local Fractal Dimension (LFD) = our Hamming distance pruning**
+
+CLAM's key insight: real-world data has low *local fractal dimension* — the
+number of points in a ball grows polynomially, not exponentially, with radius.
+This means you can prune exponentially many candidates during search.
+
+This is EXACTLY what Hamming fingerprints give us:
+- Each node/relationship gets a fingerprint (bit vector)
+- Hamming distance between fingerprints ≈ semantic distance
+- CLAM's `d_min`/`d_max` bounds = our Hamming triangle inequality pruning
+- Their `LFD << embedding_dimension` = our "90% pruning before touching properties"
+
+**2. The Search trait is our graph traversal operator**
+
+```rust
+pub trait Search<Id, I, T, A, M> {
+    fn search(&self, tree: &Tree<Id, I, T, A, M>, query: &I) -> Vec<(usize, T)>;
+}
+```
+
+CLAM provides 7 exact + 1 approximate search algorithms:
+- `KnnBranch` — greedy branch-and-bound (most relevant for graph traversal)
+- `KnnBfs` — breadth-first sieve
+- `KnnDfs` — depth-first sieve  
+- `RnnChess` — ranged NN via CHESS algorithm
+- `KnnRrnn` — repeated ranged NN with increasing radius
+
+For our `MATCH (a)-[:KNOWS*1..3]->(b)` patterns, `KnnBranch` maps directly:
+walk down the CLAM tree following the closest cluster at each level, then
+expand the radius until we have enough hits. Replace "k-NN" with "pattern match"
+and "distance function" with "Hamming fingerprint comparison".
+
+**3. panCAKES compression = our compressed graph representation**
+
+panCAKES stores each point as its *diff from the cluster center*:
+- Genomic data: store edit operations (insertions, deletions, substitutions)
+- Vector data: store delta vectors
+- Compression ratio: up to 70x for genomic data, comparable to gzip
+
+For graph fingerprints, this means:
+- Store relationship fingerprints as XOR-diffs from their node's fingerprint
+- The CLAM tree structure IS the compression index
+- Search on compressed data without decompression
+
+**4. The metric-generic design**
+
+CLAM is generic over ANY distance function `M: Fn(&I, &I) -> T`:
+```rust
+pub struct Tree<Id, I, T, A, M> {
+    items: Vec<(Id, I)>,
+    cluster_map: HashMap<usize, Cluster<T, A>>,
+    metric: M,  // user-provided distance function
+}
+```
+
+For us, `M` = Hamming distance on fingerprints. The entire CLAM/CAKES
+apparatus works without modification — we just plug in our distance function.
+The SIMD-accelerated `distances` crate already has Hamming + cosine + euclidean.
+
+### What to borrow from CLAM:
+
+```
+STEAL:
+├── DistanceValue trait + blanket impl (crates/abd-clam/src/utils/)
+├── Bipolar split partitioning (tree/partition/strategy/)
+├── d_min/d_max cluster-distance bounds (cakes/mod.rs)  
+├── KnnBranch greedy search (cakes/exact/knn_branch.rs)
+├── SizedHeap utility (utils/sized_heap.rs)
+├── Search + ParSearch traits (cakes/mod.rs)
+└── SIMD distance functions (crates/distances/src/simd/)
+
+ADAPT:
+├── Cluster → GraphCluster (add label sets, relationship types, direction)
+├── Tree → FingerprintIndex (CLAM tree over Hamming fingerprints)
+├── Search → GraphTraversal (k-NN → pattern matching)
+├── panCAKES compression → XOR-diff fingerprint storage
+└── LFD estimation → adaptive pruning threshold
+
+DON'T NEED:
+├── String distances (Needleman-Wunsch etc.)
+├── Sequence alignment (musals/)
+└── CSV export (to_csv.rs)
+```
+
+### The theoretical guarantee
+
+CAKES proves that their algorithms have time complexity:
+```
+O(k · 2^LFD · log(n))
+```
+where `LFD` is local fractal dimension and `n` is dataset size.
+
+For low LFD (typical of real-world data), this is effectively:
+```
+O(k · log(n))  — sublinear in dataset size
+```
+
+This is the formal proof of what we've been doing intuitively with
+Hamming fingerprints. The CLAM tree IS the structure that makes
+fingerprint-based pruning provably efficient.
+
+---
+
 ## Priority Order for Borrowing
 
 ```
 P0 (do first):
   ├── PackStream serde (from neo4rs) — needed for Bolt backend
   ├── Bolt message catalog (from neo4rs) — HELLO/BEGIN/RUN/PULL/COMMIT
-  └── BoltBytesBuilder test helper — for unit testing
+  ├── BoltBytesBuilder test helper — for unit testing
+  └── DistanceValue trait + SizedHeap (from CLAM) — generic distance abstraction
 
 P1 (do next):
   ├── ValueSend/ValueReceive split (from official driver)
   ├── Connection pool + TLS (from neo4rs connection.rs)
-  └── Volcano executor model (from Stoolap conceptually)
+  ├── Volcano executor model (from Stoolap conceptually)
+  └── CLAM Tree + Bipolar Split — fingerprint index structure
 
 P2 (do later):
   ├── Routing + bookmarks (from official driver)
   ├── Integration test patterns (from neo4rs tests/)
-  └── Cost-based optimizer (from Stoolap conceptually)
+  ├── Cost-based optimizer (from Stoolap conceptually)
+  ├── CAKES KnnBranch search — graph traversal via fingerprint pruning
+  └── SIMD distance functions (from CLAM distances crate)
 
 P3 (future):
   ├── Retry + resilience (from official driver)
   ├── MVCC (from Stoolap, adapted for graph)
-  └── Parallel execution (from Stoolap/Rayon)
+  ├── Parallel execution (from Stoolap/Rayon + CLAM par_new)
+  └── panCAKES compression — compressed fingerprint storage with search
 ```
