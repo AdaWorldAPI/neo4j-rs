@@ -19,7 +19,7 @@ pub mod ladybug;
 
 use async_trait::async_trait;
 use crate::model::*;
-use crate::tx::{Transaction, TxMode, TxId};
+use crate::tx::{Transaction, TxMode};
 use crate::index::IndexType;
 use crate::{Error, Result};
 

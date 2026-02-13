@@ -189,7 +189,6 @@ impl fmt::Display for Value {
 impl Value {
     /// Neo4j comparison. Returns None for incompatible types (like SQL NULL behavior).
     pub fn neo4j_cmp(&self, other: &Value) -> Option<std::cmp::Ordering> {
-        use std::cmp::Ordering;
         match (self, other) {
             (Value::Null, Value::Null) => None, // NULL = NULL is NULL in Neo4j
             (Value::Null, _) | (_, Value::Null) => None,

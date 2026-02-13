@@ -35,8 +35,6 @@ struct MemoryInner {
     adjacency: RwLock<HashMap<NodeId, Vec<RelId>>>,
     /// label → set of node IDs (poor man's label index)
     label_index: RwLock<HashMap<String, Vec<NodeId>>>,
-    /// (label, property) → map of value → node IDs
-    property_index: RwLock<HashMap<(String, String), HashMap<String, Vec<NodeId>>>>,
     next_node_id: AtomicU64,
     next_rel_id: AtomicU64,
     next_tx_id: AtomicU64,
@@ -50,7 +48,6 @@ impl MemoryBackend {
                 relationships: RwLock::new(HashMap::new()),
                 adjacency: RwLock::new(HashMap::new()),
                 label_index: RwLock::new(HashMap::new()),
-                property_index: RwLock::new(HashMap::new()),
                 next_node_id: AtomicU64::new(1),
                 next_rel_id: AtomicU64::new(1),
                 next_tx_id: AtomicU64::new(1),

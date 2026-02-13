@@ -52,7 +52,7 @@ impl<'t> Parser<'t> {
         self.peek_kind() == kind
     }
 
-    fn at_eof(&self) -> bool {
+    fn _at_eof(&self) -> bool {
         self.at(TokenKind::Eof) || self.at(TokenKind::Semicolon)
     }
 
@@ -73,7 +73,7 @@ impl<'t> Parser<'t> {
     }
 
     /// Check if current token is a keyword that starts a new clause.
-    fn at_clause_start(&self) -> bool {
+    fn _at_clause_start(&self) -> bool {
         matches!(self.peek_kind(),
             TokenKind::Match | TokenKind::OptionalMatch | TokenKind::Where |
             TokenKind::Return | TokenKind::With | TokenKind::Create |
@@ -328,7 +328,7 @@ fn parse_pattern(p: &mut Parser) -> Result<Pattern> {
 
     // Then alternating: relationship, node, relationship, node, ...
     while p.at(TokenKind::Dash) || p.at(TokenKind::LeftArrow) {
-        let (rel, dir_hint) = parse_rel_pattern(p)?;
+        let (rel, _dir_hint) = parse_rel_pattern(p)?;
         elements.push(PatternElement::Relationship(rel));
         elements.push(PatternElement::Node(parse_node_pattern(p)?));
     }
