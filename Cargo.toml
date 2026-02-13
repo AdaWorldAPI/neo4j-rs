@@ -1,0 +1,55 @@
+[package]
+name = "neo4j-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Clean Rust reimplementation of Neo4j — property graph database with full Cypher support"
+license = "Apache-2.0"
+repository = "https://github.com/AdaWorldAPI/neo4j-rs"
+keywords = ["graph", "database", "cypher", "neo4j", "property-graph"]
+categories = ["database"]
+authors = ["Jan Hübener", "Ada Consciousness Project"]
+
+[lib]
+name = "neo4j_rs"
+
+[features]
+default = []
+bolt = ["dep:tokio", "dep:bytes"]              # Neo4j Bolt protocol client
+ladybug = ["dep:ladybug", "dep:tokio"]         # ladybug-rs storage backend
+arrow-results = ["dep:arrow"]                   # Stream results as Arrow RecordBatch
+full = ["bolt", "ladybug", "arrow-results"]
+
+[dependencies]
+# === Core (always present) ===
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = "0.1"
+smallvec = { version = "1.15", features = ["serde"] }
+hashbrown = { version = "0.15", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+
+# === Optional: Bolt protocol ===
+tokio = { version = "1.49", features = ["net", "io-util", "rt", "macros"], optional = true }
+bytes = { version = "1.11", optional = true }
+
+# === Optional: ladybug-rs backend ===
+ladybug = { path = "../ladybug-rs", optional = true }
+
+# === Optional: Arrow result streaming ===
+arrow = { version = "57", optional = true, features = ["ffi"] }
+arrow-array = { version = "57", optional = true }
+arrow-schema = { version = "57", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.49", features = ["full"] }
+pretty_assertions = "1.4"
+proptest = "1.6"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+panic = "abort"
