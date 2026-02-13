@@ -120,6 +120,40 @@ Phase 4: ladybug-rs Integration
   └── CALL procedures for vector similarity
 ```
 
+## Ecosystem References (see docs/INSPIRATION.md for full analysis)
+
+### Bolt Protocol Implementation → steal from neo4rs
+- **https://github.com/neo4j-labs/neo4rs** — community Rust driver, 279★
+- Their `packstream/` module is gold: serde-based PackStream encode/decode
+- Their `bolt/request/` has all message types with binary signatures
+- Their `BoltBytesBuilder` test helper is essential for unit testing
+- **LIMITATION**: only supports Bolt 4.0-4.3, we need 5.x
+- Use their `#[derive(BoltStruct)] #[signature(0xB3, 0x4E)]` pattern
+
+### Official Rust Driver Patterns → borrow architecture
+- **https://github.com/robsdedude/neo4j-rust-driver** (publishes `neo4j` crate)
+- Same author as the Python Rust extension that got 10x speedup
+- **ValueSend/ValueReceive split** — users can't send Nodes as parameters
+- **Driver → Session → Transaction** hierarchy with connection pool
+- **Causal consistency** via bookmarks (abstract tokens for DB state)
+- **Routing** with Read/Write distinction for clusters
+- `value_map!` macro for ergonomic parameters
+
+### PackStream Is THE Hot Path
+- **https://neo4j.com/blog/developer/python-driver-10x-faster-with-rust/**
+- Neo4j rewrote Python's PackStream in Rust → 3-10x speedup
+- Binary format: marker byte + length + data (see neo4rs packstream/mod.rs)
+- Uses `bytes::Bytes` for zero-copy, serde for type dispatch
+- Profile this FIRST when optimizing
+
+### Embedded DB Architecture → borrow executor model from stoolap
+- **https://github.com/stoolap/stoolap** — embedded SQL in pure Rust
+- Volcano-style pull operators: `fn next() -> Option<Row>`
+- Cost-based optimizer with cardinality estimation
+- Clean pipeline: parser → planner → optimizer → executor → storage
+- MVCC with snapshot isolation
+- We adapt this for graph: add Expand, VarLengthExpand, ShortestPath operators
+
 ## Coding Standards
 
 - **Edition 2024**, rust-version 1.88
