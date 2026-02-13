@@ -4,7 +4,8 @@
 > architecture rules, ecosystem analysis, and practical how-to into one document.
 >
 > See also: [ARCHITECTURE.md](../ARCHITECTURE.md) (system design),
-> [INSPIRATION.md](INSPIRATION.md) (ecosystem deep-dive).
+> [INSPIRATION.md](INSPIRATION.md) (ecosystem deep-dive),
+> [REALITY_CHECK.md](REALITY_CHECK.md) (brutal audit + fix roadmap).
 
 ---
 
