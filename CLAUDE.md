@@ -163,6 +163,13 @@ Phase 4: ladybug-rs Integration
 - Their `Search` trait + `KnnBranch` greedy algorithm = our graph traversal via pruning
 - SIMD `distances` crate has Hamming, cosine, euclidean — plug directly into our metric
 - Theoretical guarantee: O(k · 2^LFD · log(n)), sublinear for real-world data
+
+### Causal Learning Theory (docs/THEORETICAL_FOUNDATIONS.md)
+- READ this before implementing any temporal or causal features
+- HDR distribution curves → calibrated effect sizes → Granger signals
+- Satisfies Squires-Uhler GSP theorem (MIT FoCM 2023) for provable causality
+- CausalCertificate: effect_size + granger_signal + CI + p-value + error bound
+- Every causal edge in the graph comes with a mathematical certificate of correctness
 - Their `DistanceValue` trait with blanket impl is cleaner than hand-rolling
 
 ## Coding Standards
