@@ -43,8 +43,6 @@ async fn setup_linear_chain() -> (Graph<neo4j_rs::storage::MemoryBackend>, NodeI
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "Multi-hop pattern (a)-[]->(b)-[]->(c) produces only the last Expand in the planner, \
-            losing the first hop. The planner needs chained Expand support to handle this."]
 async fn test_two_hop_traversal() {
     let (graph, _alice, _bob, _charlie) = setup_linear_chain().await;
 
@@ -258,8 +256,6 @@ async fn test_relationship_with_properties() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "Multi-hop pattern (a)->(b)->(c) produces only the last Expand in the planner, \
-            losing earlier hops. The planner needs chained Expand support for triangle detection."]
 async fn test_triangle_pattern() {
     let graph = Graph::open_memory().await.unwrap();
 

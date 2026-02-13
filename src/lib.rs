@@ -105,18 +105,13 @@ impl<B: StorageBackend> Graph<B> {
     where
         P: Into<PropertyMap>,
     {
-        // Phase 1: Parse
+        let params = params.into();
         let ast = cypher::parse(query)?;
-
-        // Phase 2: Plan
-        let logical = planner::plan(&ast, &params.into())?;
-
-        // Phase 3: Optimize
+        let logical = planner::plan(&ast, &params)?;
         let optimized = planner::optimize(logical)?;
 
-        // Phase 4: Execute
         let mut tx = self.backend.begin_tx(TxMode::ReadOnly).await?;
-        let result = execution::execute(&self.backend, &mut tx, optimized).await?;
+        let result = execution::execute(&self.backend, &mut tx, optimized, params).await?;
         self.backend.commit_tx(tx).await?;
 
         Ok(result)
@@ -127,12 +122,13 @@ impl<B: StorageBackend> Graph<B> {
     where
         P: Into<PropertyMap>,
     {
+        let params = params.into();
         let ast = cypher::parse(query)?;
-        let logical = planner::plan(&ast, &params.into())?;
+        let logical = planner::plan(&ast, &params)?;
         let optimized = planner::optimize(logical)?;
 
         let mut tx = self.backend.begin_tx(TxMode::ReadWrite).await?;
-        let result = execution::execute(&self.backend, &mut tx, optimized).await?;
+        let result = execution::execute(&self.backend, &mut tx, optimized, params).await?;
         self.backend.commit_tx(tx).await?;
 
         Ok(result)
@@ -169,11 +165,12 @@ impl<'g, B: StorageBackend> ExplicitTx<'g, B> {
     where
         P: Into<PropertyMap>,
     {
+        let params = params.into();
         let ast = cypher::parse(query)?;
-        let logical = planner::plan(&ast, &params.into())?;
+        let logical = planner::plan(&ast, &params)?;
         let optimized = planner::optimize(logical)?;
         let tx = self.tx.as_mut().ok_or_else(|| Error::TxError("Transaction already finished".into()))?;
-        execution::execute(&self.graph.backend, tx, optimized).await
+        execution::execute(&self.graph.backend, tx, optimized, params).await
     }
 
     pub async fn commit(mut self) -> Result<()> {

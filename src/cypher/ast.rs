@@ -18,6 +18,8 @@ pub enum Statement {
     Delete(DeleteClause),
     /// Set properties: MATCH ... SET ...
     Set(SetClause),
+    /// Remove properties/labels: MATCH ... REMOVE ...
+    Remove(RemoveClause),
     /// Schema commands
     Schema(SchemaCommand),
 }
@@ -245,6 +247,24 @@ pub enum SetItem {
     /// SET n += {map}
     MergeProperties { variable: String, value: Expr },
     /// SET n:Label
+    Label { variable: String, label: String },
+}
+
+/// REMOVE clause.
+#[derive(Debug, Clone)]
+pub struct RemoveClause {
+    pub matches: Vec<MatchClause>,
+    pub where_clause: Option<Expr>,
+    pub items: Vec<RemoveItem>,
+    pub return_clause: Option<ReturnClause>,
+}
+
+/// Single REMOVE item.
+#[derive(Debug, Clone)]
+pub enum RemoveItem {
+    /// REMOVE n.prop
+    Property { variable: String, key: String },
+    /// REMOVE n:Label
     Label { variable: String, label: String },
 }
 

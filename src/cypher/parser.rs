@@ -120,29 +120,44 @@ pub fn parse_statement(tokens: &[Token]) -> Result<Statement> {
 fn parse_query_stmt(p: &mut Parser) -> Result<Statement> {
     let mut matches = Vec::new();
     let mut where_clause = None;
+    let mut with_clauses: Vec<WithClause> = Vec::new();
 
-    // Parse MATCH clauses
-    while p.at(TokenKind::Match) || p.at(TokenKind::OptionalMatch) {
-        let optional = if p.at(TokenKind::OptionalMatch) {
-            p.advance(); // consume OPTIONAL
-            // Check if next is MATCH
-            if p.at(TokenKind::Match) {
+    // Parse MATCH/WITH clauses in a loop to allow interleaving
+    loop {
+        // Parse MATCH clauses
+        while p.at(TokenKind::Match) || p.at(TokenKind::OptionalMatch) {
+            let optional = if p.at(TokenKind::OptionalMatch) {
+                p.advance(); // consume OPTIONAL
+                // Check if next is MATCH
+                if p.at(TokenKind::Match) {
+                    p.advance();
+                }
+                true
+            } else {
+                p.advance(); // consume MATCH
+                false
+            };
+
+            let patterns = parse_pattern_list(p)?;
+            matches.push(MatchClause { optional, patterns });
+
+            // WHERE after MATCH
+            if p.at(TokenKind::Where) {
                 p.advance();
+                where_clause = Some(parse_expr(p)?);
             }
-            true
-        } else {
-            p.advance(); // consume MATCH
-            false
-        };
-
-        let patterns = parse_pattern_list(p)?;
-        matches.push(MatchClause { optional, patterns });
-
-        // WHERE after MATCH
-        if p.at(TokenKind::Where) {
-            p.advance();
-            where_clause = Some(parse_expr(p)?);
         }
+
+        // Check for WITH clause
+        if p.at(TokenKind::With) {
+            p.advance();
+            let with = parse_with_clause(p)?;
+            with_clauses.push(with);
+            // After WITH, continue to parse more MATCH/WITH/RETURN clauses
+            continue;
+        }
+
+        break;
     }
 
     // If we hit SET after MATCH, it's a MATCH...SET
@@ -177,6 +192,11 @@ fn parse_query_stmt(p: &mut Parser) -> Result<Statement> {
             variables,
             detach,
         }));
+    }
+
+    // If we hit REMOVE after MATCH, it's a MATCH...REMOVE
+    if p.at(TokenKind::Remove) {
+        return parse_remove_after_match(p, matches, where_clause);
     }
 
     // Must have RETURN
@@ -215,7 +235,7 @@ fn parse_query_stmt(p: &mut Parser) -> Result<Statement> {
     Ok(Statement::Query(Query {
         matches,
         where_clause,
-        with_clauses: Vec::new(),
+        with_clauses,
         return_clause,
         order_by,
         skip,
@@ -305,6 +325,127 @@ fn parse_call_stmt(p: &mut Parser) -> Result<Statement> {
         skip: None,
         limit: None,
     }))
+}
+
+// ============================================================================
+// WITH clause parsing
+// ============================================================================
+
+fn parse_with_clause(p: &mut Parser) -> Result<WithClause> {
+    // Parse return items (same syntax as RETURN items)
+    let mut items = Vec::new();
+    if p.at(TokenKind::Star) {
+        p.advance();
+        items.push(ReturnItem { expr: Expr::Star, alias: None });
+    } else {
+        items.push(parse_return_item(p)?);
+        while p.eat(TokenKind::Comma) {
+            items.push(parse_return_item(p)?);
+        }
+    }
+
+    // Optional WHERE after WITH items
+    let where_clause = if p.at(TokenKind::Where) {
+        p.advance();
+        Some(parse_expr(p)?)
+    } else {
+        None
+    };
+
+    Ok(WithClause { items, where_clause })
+}
+
+// ============================================================================
+// REMOVE statement parsing
+// ============================================================================
+
+fn _parse_remove_stmt(p: &mut Parser) -> Result<Statement> {
+    let mut matches = Vec::new();
+    let mut where_clause = None;
+
+    // Parse MATCH clauses
+    while p.at(TokenKind::Match) || p.at(TokenKind::OptionalMatch) {
+        let optional = if p.at(TokenKind::OptionalMatch) {
+            p.advance();
+            if p.at(TokenKind::Match) {
+                p.advance();
+            }
+            true
+        } else {
+            p.advance();
+            false
+        };
+
+        let patterns = parse_pattern_list(p)?;
+        matches.push(MatchClause { optional, patterns });
+
+        if p.at(TokenKind::Where) {
+            p.advance();
+            where_clause = Some(parse_expr(p)?);
+        }
+    }
+
+    p.expect(TokenKind::Remove)?;
+    let items = parse_remove_items(p)?;
+
+    let return_clause = if p.at(TokenKind::Return) {
+        p.advance();
+        Some(parse_return_clause(p)?)
+    } else {
+        None
+    };
+
+    Ok(Statement::Remove(RemoveClause {
+        matches,
+        where_clause,
+        items,
+        return_clause,
+    }))
+}
+
+fn parse_remove_after_match(p: &mut Parser, matches: Vec<MatchClause>, where_clause: Option<Expr>) -> Result<Statement> {
+    p.expect(TokenKind::Remove)?;
+    let items = parse_remove_items(p)?;
+
+    let return_clause = if p.at(TokenKind::Return) {
+        p.advance();
+        Some(parse_return_clause(p)?)
+    } else {
+        None
+    };
+
+    Ok(Statement::Remove(RemoveClause {
+        matches,
+        where_clause,
+        items,
+        return_clause,
+    }))
+}
+
+fn parse_remove_items(p: &mut Parser) -> Result<Vec<RemoveItem>> {
+    let mut items = Vec::new();
+    items.push(parse_remove_item(p)?);
+    while p.eat(TokenKind::Comma) {
+        items.push(parse_remove_item(p)?);
+    }
+    Ok(items)
+}
+
+fn parse_remove_item(p: &mut Parser) -> Result<RemoveItem> {
+    let name = p.expect(TokenKind::Identifier)?.text.clone();
+
+    if p.eat(TokenKind::Dot) {
+        // REMOVE n.prop
+        let key = p.expect(TokenKind::Identifier)?.text.clone();
+        Ok(RemoveItem::Property { variable: name, key })
+    } else if p.at(TokenKind::Colon) {
+        // REMOVE n:Label
+        p.advance();
+        let label = p.expect(TokenKind::Identifier)?.text.clone();
+        Ok(RemoveItem::Label { variable: name, label })
+    } else {
+        Err(p.error("Expected '.' or ':' after REMOVE variable".into()))
+    }
 }
 
 // ============================================================================
@@ -1121,6 +1262,113 @@ mod tests {
                 assert!(matches!(&q.return_clause.items[0].expr, Expr::Star));
             }
             _ => panic!("Expected Query"),
+        }
+    }
+
+    #[test]
+    fn test_with_clause() {
+        let input = "MATCH (n:Person) WITH n.name AS name RETURN name";
+        let result = super::super::parse(input);
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Query(q) => {
+                assert_eq!(q.with_clauses.len(), 1);
+                assert_eq!(q.with_clauses[0].items.len(), 1);
+                assert_eq!(q.with_clauses[0].items[0].alias.as_deref(), Some("name"));
+                assert!(q.with_clauses[0].where_clause.is_none());
+            }
+            _ => panic!("Expected Query"),
+        }
+    }
+
+    #[test]
+    fn test_with_clause_where() {
+        let input = "MATCH (n:Person) WITH n.name AS name WHERE name = 'Alice' RETURN name";
+        let result = super::super::parse(input);
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Query(q) => {
+                assert_eq!(q.with_clauses.len(), 1);
+                assert!(q.with_clauses[0].where_clause.is_some());
+            }
+            _ => panic!("Expected Query"),
+        }
+    }
+
+    #[test]
+    fn test_with_clause_multiple() {
+        let input = "MATCH (n:Person) WITH n.name AS name WITH name RETURN name";
+        let result = super::super::parse(input);
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Query(q) => {
+                assert_eq!(q.with_clauses.len(), 2);
+            }
+            _ => panic!("Expected Query"),
+        }
+    }
+
+    #[test]
+    fn test_remove_property() {
+        let input = "MATCH (n:Person) WHERE n.name = 'Alice' REMOVE n.age";
+        let result = super::super::parse(input);
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Remove(r) => {
+                assert_eq!(r.matches.len(), 1);
+                assert!(r.where_clause.is_some());
+                assert_eq!(r.items.len(), 1);
+                match &r.items[0] {
+                    RemoveItem::Property { variable, key } => {
+                        assert_eq!(variable, "n");
+                        assert_eq!(key, "age");
+                    }
+                    _ => panic!("Expected RemoveItem::Property"),
+                }
+            }
+            _ => panic!("Expected Remove"),
+        }
+    }
+
+    #[test]
+    fn test_remove_label() {
+        let input = "MATCH (n:Person) REMOVE n:Employee";
+        let result = super::super::parse(input);
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Remove(r) => {
+                assert_eq!(r.matches.len(), 1);
+                assert_eq!(r.items.len(), 1);
+                match &r.items[0] {
+                    RemoveItem::Label { variable, label } => {
+                        assert_eq!(variable, "n");
+                        assert_eq!(label, "Employee");
+                    }
+                    _ => panic!("Expected RemoveItem::Label"),
+                }
+            }
+            _ => panic!("Expected Remove"),
+        }
+    }
+
+    #[test]
+    fn test_remove_multiple_items() {
+        let input = "MATCH (n:Person) REMOVE n.age, n:Employee";
+        let result = super::super::parse(input);
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        match stmt {
+            Statement::Remove(r) => {
+                assert_eq!(r.items.len(), 2);
+                assert!(matches!(&r.items[0], RemoveItem::Property { .. }));
+                assert!(matches!(&r.items[1], RemoveItem::Label { .. }));
+            }
+            _ => panic!("Expected Remove"),
         }
     }
 }

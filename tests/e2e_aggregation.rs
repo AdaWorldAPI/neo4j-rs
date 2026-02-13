@@ -148,9 +148,6 @@ async fn test_distinct_values() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "Sort runs after Project but Sort expressions reference pre-projection variables. \
-            This test passes by coincidence (alphabetical insertion order equals sorted order), \
-            but the Sort is not actually functional. Ignored for consistency with other ORDER BY tests."]
 async fn test_order_by_ascending() {
     let graph = setup_people().await;
 
@@ -178,11 +175,6 @@ async fn test_order_by_ascending() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "Sort runs after Project in the plan, but Sort expressions reference pre-projection \
-            variables (e.g. n.name as Property(Variable(n), name)) that are no longer in the row \
-            after projection. Sort treats eval errors as NULL, so all rows compare equal and \
-            insertion order is preserved instead of being reversed. Fix: run Sort before Project \
-            or rewrite Sort keys to reference projected column names."]
 async fn test_order_by_descending() {
     let graph = setup_people().await;
 
@@ -209,10 +201,6 @@ async fn test_order_by_descending() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "Sort runs after Project in the plan, but Sort expressions reference pre-projection \
-            variables (e.g. n.age as Property(Variable(n), age)) that are no longer in the row \
-            after projection. Sort treats eval errors as NULL, preserving insertion order instead \
-            of sorting by age. Fix: run Sort before Project or rewrite Sort keys."]
 async fn test_order_by_numeric() {
     let graph = setup_people().await;
 
@@ -445,9 +433,6 @@ async fn test_multiple_aggregates() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "Sort runs after Project in the plan, but Sort expressions reference pre-projection \
-            variables that are no longer in the row. Sort treats eval errors as NULL, preserving \
-            insertion order instead of sorting by age DESC. Fix: run Sort before Project."]
 async fn test_order_by_with_limit() {
     let graph = setup_people().await;
 
