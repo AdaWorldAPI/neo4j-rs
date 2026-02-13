@@ -22,6 +22,7 @@ full = ["bolt", "ladybug", "arrow-results"]
 
 [dependencies]
 # === Core (always present) ===
+parking_lot = "0.12"
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

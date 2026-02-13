@@ -280,8 +280,10 @@ What to borrow:
 | PropertyMap | `src/model/property_map.rs` | Complete |
 | Cypher lexer | `src/cypher/lexer.rs` | Complete, tested |
 | Cypher AST types | `src/cypher/ast.rs` | Complete |
-| StorageBackend trait | `src/storage/mod.rs` | Complete |
-| MemoryBackend | `src/storage/memory.rs` | Complete, tested |
+| StorageBackend trait (v2) | `src/storage/mod.rs` | Complete — 11 new methods (8 Tier 1 + 3 Tier 2) |
+| ConstraintType, BackendCapabilities | `src/storage/mod.rs` | Complete |
+| ProcedureResult | `src/storage/mod.rs` | Complete |
+| MemoryBackend | `src/storage/memory.rs` | Complete, tested (8 tests) |
 | Transaction types | `src/tx/mod.rs` | Complete |
 | Index types | `src/index/mod.rs` | Complete |
 
@@ -513,15 +515,18 @@ The `execute()` function walks a `LogicalPlan` tree and makes
 
 ### `src/storage/` — Backend Trait + Implementations
 
-`StorageBackend` is an async trait with ~20 methods grouped into:
+`StorageBackend` is an async trait with ~31 methods grouped into:
 - **Lifecycle**: `shutdown()`
 - **Transactions**: `begin_tx()`, `commit_tx()`, `rollback_tx()`
-- **Node CRUD**: `create_node()`, `get_node()`, `delete_node()`, `set_node_property()`, etc.
-- **Relationship CRUD**: `create_relationship()`, `get_relationship()`, `delete_relationship()`
+- **Node CRUD**: `create_node()`, `get_node()`, `delete_node()`, `detach_delete_node()`, `set_node_property()`, etc.
+- **Relationship CRUD**: `create_relationship()`, `get_relationship()`, `delete_relationship()`, `set_relationship_property()`, `remove_relationship_property()`
 - **Traversal**: `get_relationships()`, `expand()`
-- **Index**: `create_index()`, `drop_index()`
+- **Index + Constraints**: `create_index()`, `drop_index()`, `create_constraint()`, `drop_constraint()`
 - **Schema**: `node_count()`, `relationship_count()`, `labels()`, `relationship_types()`
-- **Scan**: `nodes_by_label()`, `nodes_by_property()`
+- **Scan**: `all_nodes()`, `nodes_by_label()`, `nodes_by_property()`, `relationships_by_type()`
+- **Batch**: `create_nodes_batch()`, `create_relationships_batch()`
+- **Escape hatches**: `execute_raw()`, `call_procedure()`, `vector_query()`
+- **Capabilities**: `capabilities()` → `BackendCapabilities`
 
 `MemoryBackend` is the reference implementation using `HashMap` +
 `parking_lot::RwLock`. It has full CRUD, adjacency tracking, label indexing,
@@ -991,11 +996,13 @@ neo4j-rs is **always** the orchestrator: it parses Cypher, builds the plan,
 and walks the plan tree making trait calls. Backends never see Cypher strings
 (except through `execute_raw()` for Bolt passthrough).
 
-### 14.3 The 5 Trait Additions (All Neo4j-Faithful)
+### 14.3 The Trait Additions (All Neo4j-Faithful) — IMPLEMENTED
 
-These are the specific additions neo4j-rs needs. All have default
-implementations that return "not supported" or fall back to sequential.
-Zero breaking changes — any existing `StorageBackend` impl compiles unchanged.
+All additions below are now in `src/storage/mod.rs`. All have default
+implementations except `all_nodes()` (the one breaking addition). Every
+existing `StorageBackend` impl compiles with zero changes. `MemoryBackend`
+provides overrides for `set_relationship_property()`,
+`remove_relationship_property()`, and `all_nodes()`.
 
 #### Addition 1: Vector Query (Neo4j 5.x Compatible)
 
@@ -1109,35 +1116,35 @@ handles different index types.
 | `create_relationships_batch` | UNWIND optimization | Bulk edge creation |
 | `capabilities` | Index provider hints | Planner optimization |
 
-### 14.4 Additional Missing Trait Methods (Neo4j Compliance)
+### 14.4 Trait Method Gap Tracker
 
-Beyond the 5 additions above, the trait also needs these methods to be
-100% faithful to Neo4j 5.26.0 semantics (see ARCHITECTURE.md `connect` and
-`execute_raw`, plus what `ast.rs` statement types require):
+Status of methods identified as needed for Neo4j 5.26.0 fidelity.
+Items marked ✓ are in `src/storage/mod.rs` with `MemoryBackend` implementations.
 
 ```
 MUST HAVE (blocks Cypher compliance):
-  ├── connect(config)                    — factory method for backend init
-  ├── execute_raw(tx, query, params)     — Bolt passthrough escape hatch
-  ├── set_relationship_property()        — blocks SET on relationships
-  ├── remove_relationship_property()     — blocks REMOVE on relationships
-  ├── detach_delete_node()               — blocks DETACH DELETE
-  ├── all_nodes()                        — blocks MATCH (n) with no label
-  ├── relationships_by_type()            — blocks MATCH ()-[r:T]->()
-  ├── create_constraint() / drop_...     — blocks schema commands in AST
-  └── list_indexes() / list_constraints() — blocks SHOW INDEXES/CONSTRAINTS
+  ├── ✓ connect(config)                  — per-backend associated fn (not trait method)
+  ├── ✓ execute_raw(tx, query, params)   — default returns "not supported"
+  ├── ✓ set_relationship_property()      — MemoryBackend override
+  ├── ✓ remove_relationship_property()   — MemoryBackend override
+  ├── ✓ detach_delete_node()             — default cascades delete
+  ├── ✓ all_nodes()                      — MemoryBackend (required, no default)
+  ├── ✓ relationships_by_type()          — default scans all nodes
+  ├── ✓ create_constraint() / drop_...   — default returns "not supported"
+  └──   list_indexes() / list_constraints() — TODO
 
 SHOULD HAVE (faithful semantics):
-  ├── merge_node()                       — blocks MERGE (compositional fallback exists)
-  ├── shortest_path() / all_...          — blocks shortestPath() function
-  ├── nodes_by_property_range()          — blocks WHERE n.age > 25
-  ├── Transaction::bookmark()            — causal consistency
-  ├── Transaction::database()            — multi-tenancy
-  └── degree()                           — avoid materializing rels to count
+  ├──   merge_node()                     — TODO (compositional fallback exists)
+  ├──   shortest_path() / all_...        — TODO
+  ├──   nodes_by_property_range()        — TODO
+  ├──   Transaction::bookmark()          — TODO
+  ├──   Transaction::database()          — TODO
+  └──   degree()                         — TODO
 
 NICE TO HAVE (performance):
-  ├── get_nodes() (batch)                — 100-1000x for ladybug-rs
-  └── Transaction::timeout()             — prevent runaway queries
+  ├── ✓ create_nodes_batch()             — default sequential fallback
+  ├── ✓ create_relationships_batch()     — default sequential fallback
+  └──   Transaction::timeout()           — TODO
 ```
 
 ### 14.5 The Translation Layer (Inside LadybugBackend)
@@ -1376,53 +1383,117 @@ TCK, it is Neo4j-faithful by definition.
 ### 14.10 Implementation Roadmap
 
 ```
-Phase 1: neo4j-rs Trait Additions (1 week)
-  ├── Add vector_query() with default "not supported"
-  ├── Add call_procedure() with default "not found"
-  ├── Add create_nodes_batch() with default sequential fallback
-  ├── Add capabilities() with default struct
-  ├── All existing backends compile unchanged
-  └── Planner recognizes CALL statements
+Phase 1: neo4j-rs Trait Additions ✓ DONE
+  ├── ✓ vector_query() with default "not supported"
+  ├── ✓ call_procedure() with default "not found"
+  ├── ✓ create_nodes_batch() with default sequential fallback
+  ├── ✓ capabilities() with BackendCapabilities struct
+  ├── ✓ 8 Tier 1 methods (rel props, detach delete, all_nodes, constraints, etc.)
+  ├── ✓ CallProcedure variant in LogicalPlan
+  ├── ✓ ConstraintType, ProcedureResult types
+  ├── ✓ All existing backends compile unchanged (except all_nodes — 1 breaking add)
+  └── ✓ MemoryBackend overrides + 4 new tests (8 total)
 
-Phase 2: LadybugBackend Skeleton (1 week)
+Phase 2: LadybugBackend Skeleton (ladybug-rs Week 1-2)
   ├── src/backend/mod.rs in ladybug-rs
   ├── impl StorageBackend for LadybugBackend
-  ├── Node CRUD → BindSpace + Lance
+  ├── Node CRUD → BindSpace + Lance + auto-fingerprint
   ├── Relationship CRUD → Lance adjacency + fingerprint edges
   ├── Simple expand() via Lance adjacency (EXACT, no fingerprint)
-  └── All TCK-basic tests pass
+  └── Passes smoke test (see 14.12)
 
-Phase 3: Fingerprint Integration (1 week)
+Phase 3: Fingerprint Integration (ladybug-rs Week 3)
   ├── fingerprint_from_node() translation function
   ├── verb_from_rel_type() mapping (144 verbs + hash fallback)
   ├── SemanticSchema configuration
-  ├── Auto-fingerprint on create_node / create_relationship
   ├── vector_query() → CAKES/HDR search
+  ├── ladybug.similar / ladybug.bind / ladybug.debate procedures
   └── Dual-backend verification tests pass
 
-Phase 4: Procedure Registry (1 week)
-  ├── ladybug.similar → CAKES nearest neighbor
-  ├── ladybug.bind / ladybug.unbind → ABBA algebra
-  ├── ladybug.causal_trace → CausalTrace with NARS truth
-  ├── ladybug.collapse_gate → CollapseGate assessment
-  ├── ladybug.debate → Structured debate with verdict
-  └── Integration tests for all procedures
-
-Phase 5: Cognitive Acceleration (ongoing)
-  ├── Fingerprint-accelerated expand() (opt-in)
-  ├── CAKES-boosted nodes_by_property() for similarity
-  ├── ThinkingStyle-diverse search results
-  ├── Counterfactual world creation via CALL
+Phase 4: Batch + Advanced (ladybug-rs Week 4)
+  ├── create_nodes_batch → Lance columnar insert
+  ├── shortest_path → HDR cascade pruning + BFS
+  ├── Remaining CALL procedures (causal_trace, collapse_gate, etc.)
   └── Real-world benchmarks vs Neo4j
 ```
 
-### 14.11 The Contract Summary
+### 14.11 ladybug-rs Status (as of 2026-02-13)
+
+**PR #100 — 34 LLM Tactics Cognitive Primitives** (MERGED):
+- +2,254 lines, 16 files, 47 new tests
+- 8 new modules powering CALL ladybug.* procedures:
+
+| Module | What It Does | Maps to Procedure |
+|--------|-------------|-------------------|
+| `cognitive/metacog.rs` | Brier score calibration | `ladybug.calibrate` |
+| `cognitive/recursive.rs` | Berry-Esseen convergence | `ladybug.expand_recursive` |
+| `fabric/shadow.rs` | Shadow parallel processor | (internal verification) |
+| `nars/adversarial.rs` | 5 challenge types | `ladybug.challenge` |
+| `nars/contradiction.rs` | Contradiction detection | `ladybug.contradictions` |
+| `orchestration/debate.rs` | NARS truth revision debate | `ladybug.debate` |
+| `search/distribution.rs` | CRP, Mexican hat | (internal CAKES tuning) |
+| `search/temporal.rs` | Granger temporal effect | `ladybug.temporal_cause` |
+
+**PR #101 — 33 Integration Proofs** (MERGED):
+- +1,814 lines, 8 files
+- 3 proof suites: foundation (13), reasoning ladder (8), tactics (12)
+- **Total ladybug-rs tests: 912**
+
+**Key decisions from handoff:**
+- `connect()` is NOT a trait method — per-backend associated functions instead
+- `all_nodes()` is the one breaking addition (every other new method has a default)
+- Planner/executor should validate CALL procedures via `capabilities().supported_procedures`
+
+### 14.12 The Integration Smoke Test
+
+Both sides target this test. When it passes on `LadybugBackend` AND
+`BoltBackend` (minus `CALL ladybug.*`), the integration is proven:
+
+```rust
+#[tokio::test]
+async fn smoke_test_ladybug_backend() {
+    let graph = Graph::open_ladybug(LadybugConfig::default()).await.unwrap();
+
+    // CREATE
+    graph.mutate("CREATE (a:Person {name: 'Ada'})", []).await.unwrap();
+    graph.mutate("CREATE (b:Person {name: 'Jan'})", []).await.unwrap();
+    graph.mutate(
+        "MATCH (a:Person {name: 'Ada'}), (b:Person {name: 'Jan'})
+         CREATE (a)-[:KNOWS {since: 2025}]->(b)", []
+    ).await.unwrap();
+
+    // READ
+    let result = graph.execute(
+        "MATCH (n:Person) RETURN n.name ORDER BY n.name", []
+    ).await.unwrap();
+    assert_eq!(result.rows.len(), 2);
+    assert_eq!(result.rows[0].get::<String>("n.name").unwrap(), "Ada");
+
+    // TRAVERSE
+    let result = graph.execute(
+        "MATCH (a:Person {name: 'Ada'})-[:KNOWS]->(b) RETURN b.name", []
+    ).await.unwrap();
+    assert_eq!(result.rows[0].get::<String>("b.name").unwrap(), "Jan");
+
+    // EXTENSION (ladybug-specific)
+    let result = graph.execute(
+        "MATCH (n:Person {name: 'Ada'})
+         CALL ladybug.similar(n, 5) YIELD similar, score
+         RETURN similar.name, score", []
+    ).await.unwrap();
+    // Should find Jan (only other person node)
+}
+```
+
+### 14.13 The Contract Summary
 
 **neo4j-rs promises:**
 - 100% openCypher compatible Cypher parser
 - Full property graph model (Node, Rel, Path, Value)
 - ACID transactions
-- StorageBackend trait with 5 new methods (all backward compatible)
+- StorageBackend trait with 11 new methods (all backward compatible except `all_nodes`)
+- `ConstraintType`, `BackendCapabilities`, `ProcedureResult` supporting types
+- `CallProcedure` variant in `LogicalPlan`
 - Bolt backend for real Neo4j (correctness oracle)
 - CALL procedure mechanism for extensions
 
@@ -1451,9 +1522,9 @@ cognitive substrate directly.
 
 ## 15. What to Work On
 
-> **Note**: Section 14 above identifies trait gaps that must be addressed.
-> Factor these into the priorities below — specifically, the "MUST HAVE" items
-> from Gap B should be implemented alongside the execution engine (Priority 3).
+> **Note**: Section 14's MUST HAVE trait methods are now implemented. The
+> remaining work below focuses on the parser, planner, and execution engine.
+> See Section 14.4 for the SHOULD HAVE / NICE TO HAVE items still pending.
 
 ### Phase 1 Priorities (Current Focus)
 

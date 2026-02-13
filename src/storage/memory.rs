@@ -251,6 +251,33 @@ impl StorageBackend for MemoryBackend {
         Ok(self.inner.relationships.read().get(&id).cloned())
     }
 
+    async fn set_relationship_property(
+        &self,
+        _tx: &mut MemoryTx,
+        id: RelId,
+        key: &str,
+        val: Value,
+    ) -> Result<()> {
+        let mut rels = self.inner.relationships.write();
+        let rel = rels.get_mut(&id)
+            .ok_or_else(|| Error::NotFound(format!("Relationship {id}")))?;
+        rel.properties.insert(key.to_string(), val);
+        Ok(())
+    }
+
+    async fn remove_relationship_property(
+        &self,
+        _tx: &mut MemoryTx,
+        id: RelId,
+        key: &str,
+    ) -> Result<()> {
+        let mut rels = self.inner.relationships.write();
+        let rel = rels.get_mut(&id)
+            .ok_or_else(|| Error::NotFound(format!("Relationship {id}")))?;
+        rel.properties.remove(key);
+        Ok(())
+    }
+
     async fn delete_relationship(&self, _tx: &mut MemoryTx, id: RelId) -> Result<bool> {
         let removed = self.inner.relationships.write().remove(&id);
         if let Some(rel) = &removed {
@@ -407,6 +434,10 @@ impl StorageBackend for MemoryBackend {
     // Scan
     // ========================================================================
 
+    async fn all_nodes(&self, _tx: &MemoryTx) -> Result<Vec<Node>> {
+        Ok(self.inner.nodes.read().values().cloned().collect())
+    }
+
     async fn nodes_by_label(&self, _tx: &MemoryTx, label: &str) -> Result<Vec<Node>> {
         let idx = self.inner.label_index.read();
         let nodes = self.inner.nodes.read();
@@ -485,6 +516,79 @@ mod tests {
 
         let result = db.delete_node(&mut tx, a).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_all_nodes() {
+        let db = MemoryBackend::new();
+        let mut tx = db.begin_tx(TxMode::ReadWrite).await.unwrap();
+
+        db.create_node(&mut tx, &["Person"], PropertyMap::new()).await.unwrap();
+        db.create_node(&mut tx, &["Company"], PropertyMap::new()).await.unwrap();
+        db.create_node(&mut tx, &["Person"], PropertyMap::new()).await.unwrap();
+
+        let all = db.all_nodes(&tx).await.unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_detach_delete_node() {
+        let db = MemoryBackend::new();
+        let mut tx = db.begin_tx(TxMode::ReadWrite).await.unwrap();
+
+        let a = db.create_node(&mut tx, &["Person"], PropertyMap::new()).await.unwrap();
+        let b = db.create_node(&mut tx, &["Person"], PropertyMap::new()).await.unwrap();
+        db.create_relationship(&mut tx, a, b, "KNOWS", PropertyMap::new()).await.unwrap();
+
+        // Normal delete should fail (has relationships)
+        assert!(db.delete_node(&mut tx, a).await.is_err());
+
+        // Detach delete should succeed
+        assert!(db.detach_delete_node(&mut tx, a).await.unwrap());
+        assert!(db.get_node(&tx, a).await.unwrap().is_none());
+        assert_eq!(db.relationship_count(&tx).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_relationship_properties() {
+        let db = MemoryBackend::new();
+        let mut tx = db.begin_tx(TxMode::ReadWrite).await.unwrap();
+
+        let a = db.create_node(&mut tx, &["Person"], PropertyMap::new()).await.unwrap();
+        let b = db.create_node(&mut tx, &["Person"], PropertyMap::new()).await.unwrap();
+        let rel_id = db.create_relationship(
+            &mut tx, a, b, "KNOWS", PropertyMap::new(),
+        ).await.unwrap();
+
+        // Set property
+        db.set_relationship_property(&mut tx, rel_id, "since", Value::from(2025i64)).await.unwrap();
+        let rel = db.get_relationship(&tx, rel_id).await.unwrap().unwrap();
+        assert_eq!(rel.properties.get("since"), Some(&Value::from(2025i64)));
+
+        // Remove property
+        db.remove_relationship_property(&mut tx, rel_id, "since").await.unwrap();
+        let rel = db.get_relationship(&tx, rel_id).await.unwrap().unwrap();
+        assert!(rel.properties.get("since").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_relationships_by_type() {
+        let db = MemoryBackend::new();
+        let mut tx = db.begin_tx(TxMode::ReadWrite).await.unwrap();
+
+        let a = db.create_node(&mut tx, &["Person"], PropertyMap::new()).await.unwrap();
+        let b = db.create_node(&mut tx, &["Person"], PropertyMap::new()).await.unwrap();
+        let c = db.create_node(&mut tx, &["Person"], PropertyMap::new()).await.unwrap();
+
+        db.create_relationship(&mut tx, a, b, "KNOWS", PropertyMap::new()).await.unwrap();
+        db.create_relationship(&mut tx, b, c, "WORKS_WITH", PropertyMap::new()).await.unwrap();
+        db.create_relationship(&mut tx, a, c, "KNOWS", PropertyMap::new()).await.unwrap();
+
+        let knows = db.relationships_by_type(&tx, "KNOWS").await.unwrap();
+        assert_eq!(knows.len(), 2);
+
+        let works = db.relationships_by_type(&tx, "WORKS_WITH").await.unwrap();
+        assert_eq!(works.len(), 1);
     }
 
     #[tokio::test]

@@ -64,7 +64,10 @@ pub use model::{
 // Re-exports: Storage
 // ============================================================================
 
-pub use storage::{StorageBackend, BackendConfig};
+pub use storage::{
+    StorageBackend, BackendConfig, ConstraintType,
+    BackendCapabilities, ProcedureResult,
+};
 
 // ============================================================================
 // Re-exports: Transactions
