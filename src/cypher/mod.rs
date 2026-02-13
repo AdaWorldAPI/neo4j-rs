@@ -7,7 +7,7 @@ pub mod ast;
 pub mod lexer;
 pub mod parser;
 
-use crate::{Error, Result};
+use crate::Result;
 use ast::Statement;
 
 /// Parse a Cypher query string into an AST.

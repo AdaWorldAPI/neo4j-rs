@@ -198,13 +198,6 @@ impl ExecContext {
         }
     }
 
-    fn with_params(params: PropertyMap) -> Self {
-        Self {
-            columns: Vec::new(),
-            stats: ExecutionStats::default(),
-            params,
-        }
-    }
 }
 
 // ============================================================================
