@@ -904,335 +904,548 @@ The official driver has the most mature connection handling:
 
 ---
 
-## 14. Integration Contract: neo4j-rs ↔ ladybug-rs
+## 14. Integration Contract: neo4j-rs ↔ ladybug-rs Wiring Plan
 
-This section defines what the `StorageBackend` trait needs to become so that
-ladybug-rs can implement it faithfully AND neo4j-rs remains 100% truthful to
-Neo4j 5.26.0 semantics.
+> Core principle: neo4j-rs stays a perfect Neo4j citizen. ladybug-rs gets its
+> cognitive substrate. The wiring is a translation layer that loses nothing
+> from either side.
 
-### The Orchestration Model
+neo4j-rs speaks **property graph** (nodes with labels, typed properties,
+directed relationships). ladybug-rs speaks **fingerprint algebra** (16384-bit
+vectors, XOR bind/unbind, Hamming distance, NARS truth values). The
+orchestration layer translates between them without either side compromising
+its native semantics.
+
+### 14.1 What neo4j-rs MUST Remain (Non-Negotiable)
+
+neo4j-rs is a Neo4j-compatible graph database interface. Its correctness is
+measured against the openCypher TCK. It must remain 100% truthful to:
+
+| Neo4j Feature | neo4j-rs Contract |
+|--------------|-------------------|
+| Cypher syntax | Full openCypher parser |
+| Property types | Bool, Int, Float, String, Bytes, List, Map, Temporal, Spatial |
+| Node model | `{id, labels[], properties{}}` |
+| Relationship model | `{id, src, dst, type, properties{}}` |
+| Path model | Alternating Node-Rel-Node sequences |
+| ACID transactions | BEGIN/COMMIT/ROLLBACK with isolation |
+| NULL semantics | Three-valued logic (NULL ≠ false) |
+| Index types | BTree, FullText, Unique |
+| Bolt protocol | Wire-compatible with Neo4j 4.x/5.x |
+| Direction semantics | OUTGOING/INCOMING/BOTH |
+| Variable-length paths | `(a)-[*1..5]->(b)` |
+| Schema constraints | UNIQUE, EXISTS |
+
+**What neo4j-rs should NEVER know about:**
+- Fingerprints, Hamming distance, XOR bind
+- BindSpace, CAKES, HDR cascade
+- ThinkingStyles, CollapseGate, NARS
+- 144 Verbs, Go board topology
+- Any ladybug-rs cognitive concept
+
+### 14.2 The Orchestration Model
 
 ```
-User Cypher → neo4j-rs (ALWAYS parses, plans, orchestrates)
-                 │
-                 ├── For each LogicalPlan operator:
-                 │     calls StorageBackend trait methods
-                 │
-                 ├── StorageBackend::Memory   → HashMap (test oracle)
-                 ├── StorageBackend::Bolt     → sends Cypher to real Neo4j
-                 └── StorageBackend::Ladybug  → calls ladybug-rs internals
-                                                   │
-                                                   ├── Lance tables (persistence)
-                                                   ├── BindSpace (16K fingerprints)
-                                                   ├── DN-Sparse CSR (adjacency)
-                                                   └── DataFusion (query engine)
+┌──────────────────────────────────────────────────────────────────┐
+│                     USER / APPLICATION                            │
+│                                                                   │
+│  graph.execute("MATCH (n:Person) WHERE n.name = 'Ada' RETURN n") │
+│  graph.execute("CALL ladybug.similar('Ada', 10)")  ← extension   │
+│  graph.execute("MATCH p=(a)-[:CAUSES*1..5]->(b) RETURN p")       │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                   neo4j-rs  (unchanged)                           │
+│                                                                   │
+│  Cypher Parser → AST → Planner → Optimizer → Execution Engine    │
+│                                                                   │
+│  The planner sees CALL statements and routes to call_procedure(). │
+│  Everything else goes through standard StorageBackend methods.    │
+└──────────┬──────────────────┬──────────────────┬─────────────────┘
+           │                  │                  │
+           ▼                  ▼                  ▼
+┌──────────────────┐ ┌────────────────┐ ┌───────────────────────┐
+│  MemoryBackend   │ │  BoltBackend   │ │  LadybugBackend       │
+│  (test oracle)   │ │  (real Neo4j)  │ │  (cognitive engine)   │
+│                  │ │                │ │                       │
+│  HashMap storage │ │  Bolt wire     │ │  TRANSLATION LAYER    │
+│  No fingerprints │ │  protocol to   │ │  Node → Fingerprint   │
+│  No similarity   │ │  Neo4j 4.x/5.x │ │  Rel → Edge(XOR)     │
+│                  │ │                │ │  Label → NSM prime    │
+│  call_procedure  │ │  call_procedure│ │  Type → Verb(144)     │
+│  → "not found"   │ │  → forwards to │ │          │            │
+│                  │ │    Neo4j CALL  │ │  ┌───────▼──────────┐ │
+│  vector_query    │ │                │ │  │ ladybug-rs core  │ │
+│  → "not support" │ │  vector_query  │ │  │ BindSpace        │ │
+│                  │ │  → Neo4j 5.x   │ │  │ CAKES/HDR        │ │
+│                  │ │    vector idx  │ │  │ DN-Tree          │ │
+│                  │ │                │ │  │ NARS/Truth        │ │
+│                  │ │                │ │  │ CollapseGate     │ │
+│                  │ │                │ │  │ 12 Styles        │ │
+└──────────────────┘ └────────────────┘ │  └──────────────────┘ │
+                                        └───────────────────────┘
 ```
 
 neo4j-rs is **always** the orchestrator: it parses Cypher, builds the plan,
 and walks the plan tree making trait calls. Backends never see Cypher strings
-(except through `execute_raw()` escape hatch for Bolt passthrough).
+(except through `execute_raw()` for Bolt passthrough).
 
-### Gap A: ARCHITECTURE.md Promises vs Actual Trait
+### 14.3 The 5 Trait Additions (All Neo4j-Faithful)
 
-The ARCHITECTURE.md defines a trait with methods the actual `storage/mod.rs`
-**does not have yet**:
+These are the specific additions neo4j-rs needs. All have default
+implementations that return "not supported" or fall back to sequential.
+Zero breaking changes — any existing `StorageBackend` impl compiles unchanged.
 
-| Method | In ARCHITECTURE.md | In storage/mod.rs | Status |
-|--------|-------------------|-------------------|--------|
-| `connect(config)` | Yes | No | **MISSING** — needed for LadybugBackend init (open Lance, warm cache) |
-| `execute_raw(tx, query, params)` | Yes | No | **MISSING** — escape hatch for Bolt passthrough & DataFusion pushdown |
-
-### Gap B: Neo4j 5.26.0 Operations the Trait Lacks
-
-Auditing the current 22 trait methods against the full Cypher statement types
-in `ast.rs` (Query, Create, Merge, Delete, Set, Schema) reveals these gaps:
-
-#### B1. Relationship Property CRUD (blocks `SET r.prop`, `REMOVE r.prop`)
+#### Addition 1: Vector Query (Neo4j 5.x Compatible)
 
 ```rust
-// MISSING — needed for: SET r.weight = 0.5
-async fn set_relationship_property(&self, tx: &mut Self::Tx, id: RelId, key: &str, val: Value) -> Result<()>;
-
-// MISSING — needed for: REMOVE r.weight
-async fn remove_relationship_property(&self, tx: &mut Self::Tx, id: RelId, key: &str) -> Result<()>;
-```
-
-The AST has `SetItem::Property` which can target either nodes or relationships.
-The execution engine needs these methods to handle relationship writes.
-
-#### B2. DETACH DELETE (blocks `DETACH DELETE n`)
-
-```rust
-// MISSING — needed for: DETACH DELETE n (atomically delete node + all rels)
-async fn detach_delete_node(&self, tx: &mut Self::Tx, id: NodeId) -> Result<bool>;
-```
-
-The AST has `DeleteClause { detach: bool }`. Without this, the executor must
-manually enumerate and delete each relationship first — which is both slow on
-ladybug-rs (N individual Lance deletes vs one batch) and non-atomic.
-
-#### B3. MERGE / Upsert (blocks `MERGE (n:Person {name: 'Ada'})`)
-
-```rust
-// MISSING — needed for: MERGE (n:L {match_props}) ON CREATE SET ... ON MATCH SET ...
-async fn merge_node(
-    &self,
-    tx: &mut Self::Tx,
-    labels: &[&str],
-    match_props: PropertyMap,     // properties to match on
-    on_create: PropertyMap,        // properties to set if created
-    on_match: Vec<(&str, Value)>,  // properties to update if matched
-) -> Result<(NodeId, bool)>;       // (id, was_created)
-```
-
-The AST has `MergeClause { on_create, on_match }`. Without atomic merge,
-the executor composes `nodes_by_property()` + `create_node()`, but this has
-TOCTOU race conditions under concurrent writes. ladybug-rs with DataFusion
-can do atomic upserts in a single Lance operation.
-
-#### B4. Shortest Path (blocks `shortestPath()`, `allShortestPaths()`)
-
-```rust
-// MISSING — needed for: shortestPath((a)-[*]-(b))
-async fn shortest_path(
+/// Vector similarity search (Neo4j 5.x compatible).
+/// Backends that don't support this return Error::ExecutionError("not supported").
+async fn vector_query(
     &self,
     tx: &Self::Tx,
-    src: NodeId,
-    dst: NodeId,
-    dir: Direction,
-    rel_types: &[&str],
-    max_depth: Option<usize>,
-) -> Result<Option<Path>>;
-
-// MISSING — needed for: allShortestPaths((a)-[*]-(b))
-async fn all_shortest_paths(
-    &self,
-    tx: &Self::Tx,
-    src: NodeId,
-    dst: NodeId,
-    dir: Direction,
-    rel_types: &[&str],
-    max_depth: Option<usize>,
-) -> Result<Vec<Path>>;
+    index_name: &str,
+    k: usize,
+    query_vector: &[u8],
+) -> Result<Vec<(NodeId, f64)>> {
+    Err(Error::ExecutionError("vector index not supported".into()))
+}
 ```
 
-The current `expand()` returns ALL paths to a depth — it doesn't find shortest
-paths between two specific endpoints. ladybug-rs can accelerate this massively
-via Hamming-guided BFS (HDR cascade prunes 90% of candidates).
+**Why 100% Neo4j faithful:** Neo4j 5.11+ has `db.index.vector.queryNodes`.
+Bolt forwards to Neo4j's native vector search. Ladybug routes to CAKES/HDR
+cascade. Memory returns "not supported."
 
-#### B5. Scan Gaps (blocks several MATCH patterns)
+#### Addition 2: Procedure Call (Neo4j CALL Mechanism)
 
 ```rust
-// MISSING — needed for: MATCH (n) RETURN n (no label filter)
-async fn all_nodes(&self, tx: &Self::Tx) -> Result<Vec<Node>>;
-
-// MISSING — needed for: MATCH ()-[r:KNOWS]->() RETURN r
-async fn relationships_by_type(&self, tx: &Self::Tx, rel_type: &str) -> Result<Vec<Relationship>>;
-
-// MISSING — needed for: WHERE n.age > 25 AND n.age < 65 (range predicates)
-async fn nodes_by_property_range(
+/// Call a backend-specific procedure.
+/// This is the escape hatch for backend-unique operations.
+///
+/// Neo4j: CALL apoc.create.node(), CALL gds.pageRank.stream()
+/// Ladybug: CALL ladybug.similar(), CALL ladybug.bind()
+async fn call_procedure(
     &self,
     tx: &Self::Tx,
-    label: &str,
-    key: &str,
-    min: Option<&Value>,  // None = unbounded lower
-    max: Option<&Value>,  // None = unbounded upper
-) -> Result<Vec<Node>>;
+    name: &str,
+    args: Vec<Value>,
+) -> Result<QueryResult> {
+    Err(Error::ExecutionError(format!("procedure '{}' not found", name)))
+}
 ```
 
-Range queries are critical. Currently `nodes_by_property()` only does exact
-equality on ONE property. Neo4j uses B-tree indexes for range scans. ladybug-rs
-would use DataFusion's filter pushdown.
+**Why 100% Neo4j faithful:** Neo4j's CALL mechanism is how ALL extensions work
+— APOC, GDS, custom procedures. This IS the standard extension point.
 
-#### B6. Batch Operations (performance-critical for ladybug-rs)
+#### Addition 3: Batch Node Creation
 
 ```rust
-// MISSING — needed for efficient plan execution with IN lists
-async fn get_nodes(&self, tx: &Self::Tx, ids: &[NodeId]) -> Result<Vec<Option<Node>>>;
-
-// MISSING — needed for bulk import / UNWIND
+/// Batch create nodes. Backends should optimize for bulk writes.
+/// Default falls back to sequential create_node.
 async fn create_nodes_batch(
     &self,
     tx: &mut Self::Tx,
-    nodes: Vec<(&[&str], PropertyMap)>,  // (labels, props) per node
-) -> Result<Vec<NodeId>>;
+    nodes: Vec<(&[&str], PropertyMap)>,
+) -> Result<Vec<NodeId>> {
+    let mut ids = Vec::with_capacity(nodes.len());
+    for (labels, props) in nodes {
+        ids.push(self.create_node(tx, labels, props).await?);
+    }
+    Ok(ids)
+}
 ```
 
-For ladybug-rs this is the difference between 1 Lance read (batch) vs N
-individual reads. Lance is columnar — batch is 100-1000x faster.
-
-#### B7. Schema Constraints (blocks `CREATE CONSTRAINT`)
+#### Addition 4: Batch Relationship Creation
 
 ```rust
-// MISSING — needed for: CREATE CONSTRAINT FOR (n:Person) REQUIRE n.email IS UNIQUE
-async fn create_constraint(
+/// Batch create relationships.
+async fn create_relationships_batch(
     &self,
-    label: &str,
-    property: &str,
-    constraint_type: ConstraintType,
-) -> Result<()>;
-
-async fn drop_constraint(&self, label: &str, property: &str) -> Result<()>;
-
-async fn list_indexes(&self, tx: &Self::Tx) -> Result<Vec<IndexInfo>>;
-async fn list_constraints(&self, tx: &Self::Tx) -> Result<Vec<ConstraintInfo>>;
-```
-
-The AST already has `SchemaCommand::CreateConstraint` and `DropConstraint` —
-but the trait has no way to execute them. Neo4j 5.26.0 supports UNIQUE, NODE
-KEY, EXISTENCE, and RELATIONSHIP TYPE existence constraints.
-
-#### B8. Degree Counting (performance optimization)
-
-```rust
-// MISSING — needed for: size((n)-->()) without materializing all rels
-async fn degree(
-    &self,
-    tx: &Self::Tx,
-    node: NodeId,
-    dir: Direction,
-    rel_type: Option<&str>,
-) -> Result<u64>;
-```
-
-Currently `get_relationships()` returns all relationships just to count them.
-ladybug-rs can answer degree queries from DN-Sparse CSR metadata without
-touching Lance at all.
-
-### Gap C: What ladybug-rs Must Expose (the Integration Surface)
-
-For ladybug-rs to implement `StorageBackend`, it needs to provide:
-
-```
-ladybug-rs public API (what neo4j-rs imports):
-├── LadybugBackend          — struct implementing StorageBackend
-├── LadybugTx               — struct implementing Transaction
-├── LadybugConfig            — initialization config (data_dir, cache_size, etc.)
-└── Error conversions        — ladybug errors → neo4j-rs Error
-```
-
-#### What ladybug-rs must handle internally:
-
-| neo4j-rs Calls | ladybug-rs Translates To |
-|----------------|--------------------------|
-| `create_node(labels, props)` | Lance INSERT into nodes table + BindSpace fingerprint alloc |
-| `get_node(id)` | Lance point lookup + JSON→PropertyMap deserialize |
-| `get_nodes(ids)` | Lance batch read (single I/O, columnar) |
-| `nodes_by_label(label)` | DataFusion: `SELECT * FROM nodes WHERE labels @> [label]` |
-| `nodes_by_property(label, k, v)` | DataFusion: `SELECT * FROM nodes WHERE labels @> [label] AND json_extract(properties, k) = v` |
-| `nodes_by_property_range(...)` | DataFusion: `SELECT * ... WHERE json_extract(...) BETWEEN min AND max` |
-| `expand(node, dir, types, depth)` | Hamming-guided BFS on DN-Sparse + HDR cascade pruning |
-| `shortest_path(src, dst, ...)` | Hamming-guided bidirectional BFS (HDR cascade distance estimate) |
-| `create_index(label, prop, type)` | Lance: create secondary index; for Vector: IVF-PQ on fingerprints |
-| `merge_node(labels, match_props, ...)` | DataFusion: atomic INSERT ... ON CONFLICT via Lance transactions |
-| `detach_delete_node(id)` | Lance: batch delete from nodes + relationships WHERE src_id=id OR dst_id=id |
-| `execute_raw(query, params)` | DataFusion: run SQL directly (escape hatch) |
-| `begin_tx(mode)` | Lance: begin transaction (copy-on-write) |
-| `commit_tx(tx)` | Lance: commit version |
-
-#### What ladybug-rs must NOT expose:
-
-- BindSpace internals (16K fingerprint arrays)
-- DN-Sparse CSR format
-- HDR cascade levels
-- DataFusion execution details
-- holograph types
-
-All of these stay behind the `StorageBackend` trait boundary.
-
-### Gap D: Transaction Trait Needs Enrichment
-
-The current `Transaction` trait is too thin:
-
-```rust
-// Current — just mode + id
-pub trait Transaction: Send + Sync {
-    fn mode(&self) -> TxMode;
-    fn id(&self) -> TxId;
+    tx: &mut Self::Tx,
+    rels: Vec<(NodeId, NodeId, &str, PropertyMap)>,
+) -> Result<Vec<RelId>> {
+    let mut ids = Vec::with_capacity(rels.len());
+    for (src, dst, rel_type, props) in rels {
+        ids.push(self.create_relationship(tx, src, dst, rel_type, props).await?);
+    }
+    Ok(ids)
 }
 ```
 
-For Neo4j 5.26.0 compatibility, it needs:
+#### Addition 5: Backend Capabilities
 
 ```rust
-pub trait Transaction: Send + Sync {
-    fn mode(&self) -> TxMode;
-    fn id(&self) -> TxId;
-
-    // Causal consistency — Neo4j bookmarks
-    fn bookmark(&self) -> Option<&str>;
-
-    // Database targeting — Neo4j multi-tenancy
-    fn database(&self) -> Option<&str>;
-
-    // Timeout — prevent runaway queries
-    fn timeout(&self) -> Option<std::time::Duration>;
+fn capabilities(&self) -> BackendCapabilities {
+    BackendCapabilities::default()
 }
 ```
 
-ladybug-rs would use `bookmark()` for Lance version pinning (snapshot reads).
-Bolt would forward bookmarks to the Neo4j server. Memory can ignore them.
-
-### Gap E: Capability Negotiation
-
-Different backends support different features. The execution engine needs to
-know what it can push down vs what it must handle itself:
+Where:
 
 ```rust
-/// What a backend can handle natively.
-pub trait BackendCapabilities {
-    /// Can the backend handle filtered scans with arbitrary predicates?
-    fn supports_predicate_pushdown(&self) -> bool;
-
-    /// Can the backend handle shortestPath natively?
-    fn supports_shortest_path(&self) -> bool;
-
-    /// Can the backend handle aggregation (COUNT, SUM, etc.)?
-    fn supports_aggregation_pushdown(&self) -> bool;
-
-    /// Can the backend run raw queries? (Bolt: yes, Memory: no)
-    fn supports_raw_query(&self) -> bool;
-
-    /// Can the backend do atomic MERGE? (Ladybug: yes, Memory: no)
-    fn supports_atomic_merge(&self) -> bool;
-
-    /// Does the backend support vector similarity search?
-    fn supports_vector_search(&self) -> bool;
+#[derive(Debug, Clone, Default)]
+pub struct BackendCapabilities {
+    pub supports_vector_index: bool,
+    pub supports_fulltext_index: bool,
+    pub supports_procedures: bool,
+    pub supports_batch_writes: bool,
+    pub max_batch_size: Option<usize>,
+    pub procedures: Vec<String>,       // registered procedure names
+    pub similarity_accelerated: bool,  // hint for planner
 }
 ```
 
-The execution engine uses this to make optimization decisions:
-- Memory: handle everything in the executor (no pushdown)
-- Bolt: push entire query via `execute_raw()` (maximum pushdown)
-- Ladybug: push filtered scans and shortest paths, handle CASE/UNWIND in executor
+The planner uses `capabilities()` to generate better physical plans. If
+`similarity_accelerated` is true, the optimizer pushes Hamming filters into
+the scan operator instead of post-filtering — exactly how Neo4j's planner
+handles different index types.
 
-### Summary: Required Changes by Priority
+| Addition | Neo4j Precedent | What It Unlocks for ladybug-rs |
+|----------|----------------|-------------------------------|
+| `vector_query` | Neo4j 5.11 vector index | CAKES/HDR similarity search |
+| `call_procedure` | APOC / GDS / custom procs | ALL cognitive operations |
+| `create_nodes_batch` | UNWIND optimization | 100K fp/sec BindSpace load |
+| `create_relationships_batch` | UNWIND optimization | Bulk edge creation |
+| `capabilities` | Index provider hints | Planner optimization |
+
+### 14.4 Additional Missing Trait Methods (Neo4j Compliance)
+
+Beyond the 5 additions above, the trait also needs these methods to be
+100% faithful to Neo4j 5.26.0 semantics (see ARCHITECTURE.md `connect` and
+`execute_raw`, plus what `ast.rs` statement types require):
 
 ```
 MUST HAVE (blocks Cypher compliance):
+  ├── connect(config)                    — factory method for backend init
+  ├── execute_raw(tx, query, params)     — Bolt passthrough escape hatch
   ├── set_relationship_property()        — blocks SET on relationships
   ├── remove_relationship_property()     — blocks REMOVE on relationships
   ├── detach_delete_node()               — blocks DETACH DELETE
   ├── all_nodes()                        — blocks MATCH (n) with no label
   ├── relationships_by_type()            — blocks MATCH ()-[r:T]->()
-  ├── connect(config)                    — blocks any non-Memory backend init
   ├── create_constraint() / drop_...     — blocks schema commands in AST
   └── list_indexes() / list_constraints() — blocks SHOW INDEXES/CONSTRAINTS
 
-SHOULD HAVE (needed for faithful semantics):
+SHOULD HAVE (faithful semantics):
   ├── merge_node()                       — blocks MERGE (compositional fallback exists)
   ├── shortest_path() / all_...          — blocks shortestPath() function
   ├── nodes_by_property_range()          — blocks WHERE n.age > 25
-  ├── execute_raw()                      — blocks Bolt passthrough
-  ├── Transaction::bookmark()            — blocks causal consistency
-  └── Transaction::database()            — blocks multi-tenancy
+  ├── Transaction::bookmark()            — causal consistency
+  ├── Transaction::database()            — multi-tenancy
+  └── degree()                           — avoid materializing rels to count
 
-NICE TO HAVE (performance, ladybug-rs benefits massively):
+NICE TO HAVE (performance):
   ├── get_nodes() (batch)                — 100-1000x for ladybug-rs
-  ├── create_nodes_batch()               — bulk import
-  ├── degree()                           — avoid materializing rels
-  └── BackendCapabilities trait          — optimizer decisions
+  └── Transaction::timeout()             — prevent runaway queries
 ```
+
+### 14.5 The Translation Layer (Inside LadybugBackend)
+
+This is where property graph ↔ fingerprint algebra translation happens.
+It lives entirely inside ladybug-rs. neo4j-rs never sees it.
+
+#### Node → Fingerprint
+
+```
+Neo4j Node:                           Ladybug Fingerprint:
+{                                     16384 bits:
+  id: 42,                               [semantic field: bits 0-8191]
+  labels: ["Person", "Developer"],        ← from_content(labels + props)
+  properties: {                          [metadata field: bits 8192-16383]
+    name: "Ada",                          ← from node ID + structural info
+    age: 3,
+    skills: ["Rust", "Python"]
+  }
+}
+```
+
+Which properties are "semantic" (contribute to fingerprint) vs "metadata"
+(stored but not in fingerprint) is a configuration choice:
+
+```rust
+pub struct SemanticSchema {
+    /// Properties that contribute to the fingerprint for each label.
+    /// If empty, ALL properties contribute (default).
+    pub semantic_props: HashMap<String, Vec<String>>,
+}
+```
+
+#### Relationship → Edge (XOR Bind)
+
+```
+Neo4j Relationship:                   Ladybug Edge:
+{                                     Fingerprint = src ⊗ verb ⊗ dst
+  id: 99,                            where:
+  src: 42,                              src = node_42.fingerprint
+  dst: 17,                              verb = Verb::from_type("KNOWS")
+  type: "KNOWS",                        dst = node_17.fingerprint
+  properties: { since: 2024 }
+}
+```
+
+`rel_type` → Verb mapping (partial):
+
+| Neo4j rel_type | Ladybug Verb | Category |
+|----------------|-------------|----------|
+| `CAUSES` | `Verb::Causes (24)` | Causal |
+| `IS_A` | `Verb::IsA (0)` | Structural |
+| `KNOWS` | `Verb::ConnectedTo (15)` | Structural |
+| `FOLLOWS` | `Verb::Follows (62)` | Temporal |
+| `PART_OF` | `Verb::PartOf (2)` | Structural |
+| `INFLUENCES` | `Verb::Influences (35)` | Causal |
+| `BEFORE` | `Verb::Before (48)` | Temporal |
+| `SIMILAR_TO` | `Verb::SimilarTo (6)` | Structural |
+| (custom) | `from_content("VERB:custom")` | Hash fallback |
+
+#### Traversal Translation
+
+Default `expand()` uses **EXACT** traversal (Lance adjacency index) — faithful
+to Neo4j semantics. Fingerprint-accelerated traversal is **OPT-IN** only:
+
+```rust
+async fn expand(&self, ...) -> Result<Vec<Path>> {
+    // EXACT path: use Lance adjacency index (faithful to Neo4j)
+    let exact_paths = self.lance_expand(tx, node, dir, rel_types, depth).await?;
+
+    // Fingerprint expansion is OPT-IN only — never default
+    if self.config.enable_fingerprint_expansion {
+        let fp_paths = self.fingerprint_expand(tx, node, dir, rel_types, depth).await?;
+        // Merge, deduplicate, return
+    }
+
+    Ok(exact_paths)
+}
+```
+
+#### Backend Metadata (Fingerprints on Nodes)
+
+ladybug-rs stores fingerprints as `_ladybug_fingerprint: Bytes(Vec<u8>)` in
+the property map. The `_` prefix is a Neo4j convention for internal properties.
+The execution layer filters them from `RETURN *` output. Zero trait change
+needed.
+
+#### Lifecycle Hooks (Internal to LadybugBackend)
+
+When a node is created, ladybug-rs computes its fingerprint, inserts into
+CAKES, updates HDR cascade. This is handled inside `LadybugBackend::create_node()`:
+
+```rust
+// Inside ladybug-rs — neo4j-rs never sees this
+async fn create_node(&self, tx: &mut LadybugTx, labels: &[&str], props: PropertyMap) -> Result<NodeId> {
+    let id = self.next_id();
+    let fp = self.fingerprint_from_node(labels, &props);
+    self.lance.insert_node(id, labels, &props, &fp).await?;
+    self.bind_space.insert(id.0 as usize, fp);
+    if let Some(cakes) = &self.cakes { cakes.insert(&fp); }
+    tx.log_create_node(id);
+    Ok(id)
+}
+```
+
+No trait change needed. Pure implementation concern.
+
+### 14.6 Procedure Registry (The Extension Surface)
+
+`call_procedure()` is where ladybug-rs exposes cognitive operations without
+polluting the Neo4j contract. Users interact entirely through standard Cypher:
+
+```cypher
+-- Standard Neo4j (100% faithful)
+MATCH (n:Person {name: 'Ada'}) RETURN n
+
+-- Neo4j 5.x vector query (standard)
+CALL db.index.vector.queryNodes('person_embedding', 10, $query_vector)
+YIELD node, score RETURN node.name, score
+
+-- ladybug-rs extension (via CALL)
+MATCH (n:Person {name: 'Ada'})
+CALL ladybug.similar(n, 10) YIELD similar, score
+RETURN similar.name, score
+
+-- Cognitive operation (via CALL)
+MATCH (pro:Argument)-[:SUPPORTS]->(thesis:Claim)
+MATCH (con:Argument)-[:CONTRADICTS]->(thesis)
+CALL ladybug.debate(collect(pro), collect(con))
+YIELD verdict, truth
+RETURN verdict, truth.frequency, truth.confidence
+
+-- Causal trace (via CALL)
+MATCH (effect:Event {name: 'system_failure'})
+CALL ladybug.causal_trace(effect, 5) YIELD path, truth
+WHERE truth.confidence > 0.6
+RETURN path, truth
+```
+
+Registered procedures in LadybugBackend:
+
+| Procedure | Cypher Syntax | What It Does |
+|-----------|--------------|-------------|
+| `ladybug.similar` | `CALL ladybug.similar(node, k) YIELD similar, score` | CAKES nearest neighbor search |
+| `ladybug.bind` | `CALL ladybug.bind(a, verb, b) YIELD edge_fp` | Create ABBA-retrievable edge |
+| `ladybug.unbind` | `CALL ladybug.unbind(edge_fp, key_fp) YIELD recovered_fp` | Recover other end of bound edge |
+| `ladybug.causal_trace` | `CALL ladybug.causal_trace(effect, depth) YIELD path, truth` | Reverse causal trace with NARS |
+| `ladybug.collapse_gate` | `CALL ladybug.collapse_gate(candidates) YIELD state, sd, decision` | CollapseGate assessment |
+| `ladybug.thinking_styles` | `CALL ladybug.thinking_styles(query) YIELD style, result` | 12 thinking styles, diverse results |
+| `ladybug.debate` | `CALL ladybug.debate(pro, con) YIELD verdict, truth` | Structured debate with verdict |
+| `ladybug.counterfactual` | `CALL ladybug.counterfactual(world, intervention) YIELD cf_world` | Pearl Rung 3 intervention |
+| `ladybug.hdr_scan` | `CALL ladybug.hdr_scan(query_fp, radius) YIELD node, distance` | HDR cascade range scan |
+| `db.index.vector.queryNodes` | Neo4j 5.x standard | Routes to CAKES internally |
+| `db.labels` | Neo4j standard | List all labels |
+| `db.relationshipTypes` | Neo4j standard | List all relationship types |
+
+### 14.7 Gotchas & Hardening
+
+#### Semantic Gotchas
+
+| # | Gotcha | Severity | Mitigation |
+|---|--------|----------|------------|
+| W-1 | Fingerprint collision: similar content → similar fingerprints | Low | This is a **feature**, not a bug (cosine-like behavior) |
+| W-2 | Verb mapping ambiguity: "KNOWS" could be ConnectedTo or Familiar | Medium | Configurable verb mapping table per schema |
+| W-3 | Property ordering: HashMap iteration is non-deterministic | **High** | Sort keys before fingerprinting |
+| W-4 | NULL properties: `SET n.x = null` removes the property | Medium | Recompute fingerprint on property change |
+| W-5 | Transaction isolation: fingerprint updates must be atomic with Lance | **High** | Write both in same tx, rollback both on failure |
+| W-6 | DETACH DELETE must also clean BindSpace + CAKES | **High** | Override `delete_node` to cascade into fingerprint storage |
+
+#### Performance Gotchas
+
+| # | Gotcha | Impact | Mitigation |
+|---|--------|--------|------------|
+| W-7 | Fingerprint computation on every write | ~1us per node | Acceptable. 1M nodes = 1 second |
+| W-8 | CAKES tree rebalancing on insert | O(log n) per insert | Batch inserts, rebuild periodically |
+| W-9 | Lance compaction during writes | Can block reads for seconds | Run compaction async, not in hot path |
+| W-10 | BindSpace memory: 256 u64 per node = 2KB | 1M nodes = 2GB RAM | Tiered: hot in BindSpace, cold in Lance |
+
+#### Correctness Gotchas
+
+| # | Gotcha | The Real Problem | Solution |
+|---|--------|-----------------|----------|
+| W-11 | `expand()` with fingerprint search finds semantically similar paths, not topologically connected ones | User expects `(a)-[:KNOWS*3]->(b)` to return ACTUAL paths | Default expand = EXACT (Lance adjacency). Fingerprint = OPT-IN only |
+| W-12 | NARS truth values on edges have no Neo4j equivalent | Returning truth.frequency in output is non-standard | Expose via CALL procedures only, or use `_ladybug_truth_f` properties |
+| W-13 | Shortest path algorithms assume distance = hop count, not Hamming | `shortestPath()` must use graph topology, not fingerprint similarity | Implement on adjacency index, not CAKES |
+| W-14 | Neo4j's `id()` returns dense integer IDs | Ladybug may use hash-based IDs | Use sequential counter for external IDs, hash for internal addressing |
+
+### 14.8 Transaction & Capability Enrichment
+
+#### Transaction Trait Needs Expansion
+
+```rust
+pub trait Transaction: Send + Sync {
+    fn mode(&self) -> TxMode;
+    fn id(&self) -> TxId;
+    fn bookmark(&self) -> Option<&str>;            // causal consistency
+    fn database(&self) -> Option<&str>;            // multi-tenancy
+    fn timeout(&self) -> Option<std::time::Duration>; // runaway prevention
+}
+```
+
+ladybug-rs uses `bookmark()` for Lance version pinning. Bolt forwards
+bookmarks to Neo4j. Memory ignores them.
+
+### 14.9 Dual-Backend Testing Strategy
+
+The ultimate correctness test: run the same Cypher against BoltBackend (real
+Neo4j) and LadybugBackend. Results **must match**.
+
+```rust
+#[tokio::test]
+async fn dual_backend_match() {
+    let neo4j = Graph::with_backend(
+        BoltBackend::connect("bolt://localhost:7687", "neo4j", "pass").await?);
+    let ladybug = Graph::with_backend(
+        LadybugBackend::open("./test_data").await?);
+
+    let cypher = "CREATE (a:Person {name: 'Ada'})-[:KNOWS]->(b:Person {name: 'Jan'})";
+    neo4j.mutate(cypher, []).await?;
+    ladybug.mutate(cypher, []).await?;
+
+    let q = "MATCH (n:Person) RETURN n.name ORDER BY n.name";
+    let neo4j_result = neo4j.execute(q, []).await?;
+    let ladybug_result = ladybug.execute(q, []).await?;
+
+    assert_eq!(neo4j_result.rows().len(), ladybug_result.rows().len());
+    for (nr, lr) in neo4j_result.rows().iter().zip(ladybug_result.rows()) {
+        assert_eq!(nr.get::<String>("n.name"), lr.get::<String>("n.name"));
+    }
+}
+```
+
+openCypher TCK tests must pass on **all** backends. If LadybugBackend passes
+TCK, it is Neo4j-faithful by definition.
+
+### 14.10 Implementation Roadmap
+
+```
+Phase 1: neo4j-rs Trait Additions (1 week)
+  ├── Add vector_query() with default "not supported"
+  ├── Add call_procedure() with default "not found"
+  ├── Add create_nodes_batch() with default sequential fallback
+  ├── Add capabilities() with default struct
+  ├── All existing backends compile unchanged
+  └── Planner recognizes CALL statements
+
+Phase 2: LadybugBackend Skeleton (1 week)
+  ├── src/backend/mod.rs in ladybug-rs
+  ├── impl StorageBackend for LadybugBackend
+  ├── Node CRUD → BindSpace + Lance
+  ├── Relationship CRUD → Lance adjacency + fingerprint edges
+  ├── Simple expand() via Lance adjacency (EXACT, no fingerprint)
+  └── All TCK-basic tests pass
+
+Phase 3: Fingerprint Integration (1 week)
+  ├── fingerprint_from_node() translation function
+  ├── verb_from_rel_type() mapping (144 verbs + hash fallback)
+  ├── SemanticSchema configuration
+  ├── Auto-fingerprint on create_node / create_relationship
+  ├── vector_query() → CAKES/HDR search
+  └── Dual-backend verification tests pass
+
+Phase 4: Procedure Registry (1 week)
+  ├── ladybug.similar → CAKES nearest neighbor
+  ├── ladybug.bind / ladybug.unbind → ABBA algebra
+  ├── ladybug.causal_trace → CausalTrace with NARS truth
+  ├── ladybug.collapse_gate → CollapseGate assessment
+  ├── ladybug.debate → Structured debate with verdict
+  └── Integration tests for all procedures
+
+Phase 5: Cognitive Acceleration (ongoing)
+  ├── Fingerprint-accelerated expand() (opt-in)
+  ├── CAKES-boosted nodes_by_property() for similarity
+  ├── ThinkingStyle-diverse search results
+  ├── Counterfactual world creation via CALL
+  └── Real-world benchmarks vs Neo4j
+```
+
+### 14.11 The Contract Summary
+
+**neo4j-rs promises:**
+- 100% openCypher compatible Cypher parser
+- Full property graph model (Node, Rel, Path, Value)
+- ACID transactions
+- StorageBackend trait with 5 new methods (all backward compatible)
+- Bolt backend for real Neo4j (correctness oracle)
+- CALL procedure mechanism for extensions
+
+**ladybug-rs promises:**
+- Implement StorageBackend faithfully
+- Default `expand()` uses EXACT traversal (not approximate)
+- Fingerprint operations exposed ONLY via CALL procedures
+- No cognitive concepts leak into the property graph model
+- Same Cypher queries produce same results on both backends
+- Cognitive acceleration is OPT-IN, never default
+
+**The translation layer promises:**
+- Node → Fingerprint is deterministic and configurable
+- RelType → Verb uses the 144 Go board verbs when possible
+- Properties are sorted before fingerprinting
+- BindSpace and Lance are always consistent
+- Rollback cleans both stores
+- Batch operations don't bypass transaction semantics
+
+The user sees a Neo4j-compatible graph database. Under the hood, every node
+is a 16384-bit vector in a CAKES tree with NARS truth values on its edges.
+The user never needs to know — unless they `CALL ladybug.*` and ask for the
+cognitive substrate directly.
 
 ---
 
