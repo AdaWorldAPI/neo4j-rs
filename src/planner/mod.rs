@@ -30,6 +30,8 @@ pub enum LogicalPlan {
     Sort { input: Box<LogicalPlan>, keys: Vec<(crate::cypher::ast::Expr, bool)> },
     /// Cartesian product of two inputs
     CartesianProduct { left: Box<LogicalPlan>, right: Box<LogicalPlan> },
+    /// Call a procedure: CALL name(args) YIELD columns
+    CallProcedure { name: String, args: Vec<crate::cypher::ast::Expr>, yields: Vec<String> },
     /// Empty leaf (produces one empty row)
     Argument,
 }
