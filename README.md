@@ -59,6 +59,11 @@ async fn main() -> neo4j_rs::Result<()> {
 }
 ```
 
+## Contributing
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full development guide —
+prerequisites, building, testing, module walkthrough, and coding conventions.
+
 ## Reference
 
 This is a clean-room reimplementation referencing:
