@@ -53,6 +53,7 @@ pub mod storage;
 pub mod tx;
 pub mod index;
 pub mod chess;
+pub mod aiwar;
 
 // ============================================================================
 // Re-exports: Model (the DTOs)
