@@ -39,6 +39,10 @@ bytes = { version = "1.11", optional = true }
 # === Optional: ladybug-rs backend ===
 ladybug = { path = "../ladybug-rs", optional = true }
 
+# === Chess stack: stonksfish engine + chess crate (always present for chess procedures) ===
+stonksfish = { path = "../stonksfish" }
+chess = "3.2.0"
+
 # === Optional: Arrow result streaming ===
 arrow = { version = "57", optional = true, features = ["ffi"] }
 arrow-array = { version = "57", optional = true }
