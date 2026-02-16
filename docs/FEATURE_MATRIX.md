@@ -215,22 +215,50 @@
 
 ### ladybug-rs CAM Address Mapping
 
+> **Full reference**: [`CAM_CYPHER_REFERENCE.md`](CAM_CYPHER_REFERENCE.md)
+> Source: `ladybug-rs/src/learning/cam_ops.rs` (4776 lines, 4096 ops)
+
 | Neo4j Concept | CAM Address Region | Container Words |
 |---------------|-------------------|-----------------|
 | `Node.id` | `W0` PackedDn address | Identity |
 | `Node.labels` | `W40-47` Bloom filter | Label membership test |
 | `Node.properties` | Content container (1 KB) | Geometry = CAM or Chunked |
-| Relationship edges | `W16-31` inline edges | `rel_type → verb_id` packed |
+| Relationship edges | `W16-31` inline (64 max) + `W96-111` CSR (12 max) | `verb:u8 \| target` packed |
 | Graph metrics | `W48-55` | PageRank, degree, clustering |
+| NARS truth values | `W4-7` | Frequency, confidence, evidence |
+| Layer markers | `W12-15` | 10-layer thinking_style activation |
+| Qualia channels | `W56-63` | 18 x f16 affect dimensions |
 | `NodeId(u64)` ↔ `PackedDn` | 7-level hierarchical address | Lexicographic sort = tree order |
 
-### ladybug-rs Type Namespace (Upper 16 bits of CAM key)
+### Cypher Operations → CAM Addresses (0x200–0x2FF)
+
+| Address | Op Name | Cypher | StorageBackend Method |
+|:-------:|---------|--------|----------------------|
+| `0x200` | MatchNode | `MATCH (n:Label)` | `get_node()`, `nodes_by_label()` |
+| `0x201` | MatchEdge | `MATCH ()-[r:T]->()` | `get_relationships()` |
+| `0x204` | OptionalMatch | `OPTIONAL MATCH` | (executor handles) |
+| `0x205` | MatchSimilar | `WHERE n.fp SIMILAR TO $q` | `vector_query()` |
+| `0x220` | CreateNode | `CREATE (n:Label {})` | `create_node()` |
+| `0x221` | CreateEdge | `CREATE (a)-[:T]->(b)` | `create_relationship()` |
+| `0x223` | Merge | `MERGE (n:Label {})` | (get-or-create) |
+| `0x241` | SetProperty | `SET n.prop = val` | `set_property()` |
+| `0x242` | SetLabel | `SET n:Label` | `add_label()` |
+| `0x244` | RemoveProperty | `REMOVE n.prop` | `remove_property()` |
+| `0x245` | RemoveLabel | `REMOVE n:Label` | `remove_label()` |
+| `0x246` | Delete | `DELETE n` | `delete_node()` |
+| `0x247` | DetachDelete | `DETACH DELETE n` | `detach_delete_node()` |
+| `0x260` | ShortestPath | `shortestPath(...)` | HammingMinPlus semiring |
+| `0x265` | VariableLength | `(a)-[*1..5]->(b)` | `expand()` → `container_multi_hop()` |
+| `0x2C4` | NodeSimilarity | Hamming distance | Content container SIMD |
+| `0x2C5` | Knn | k-NN search | HDR cascade (Belichtungsmesser) |
+
+### Type Namespaces
 
 | Range | Category | Maps To |
 |-------|----------|---------|
 | `0x0001-0x00FF` | Entity types | Node labels (Person, Position, etc.) |
 | `0x0100-0x01FF` | Edge/relationship types | CAUSES, SUPPORTS, MAPS_TO, etc. |
-| `0x0200-0x02FF` | Consciousness layers | L1-L10 cognitive stack |
+| `0x0200-0x02FF` | **Cypher operations** | Full Cypher command set |
 | `0x0300-0x03FF` | Thinking styles | Agent cognitive fingerprints |
 | `0x0400+` | Learned codebooks | Crystallized knowledge clusters |
 | `0x0600` | Chess/Crystal concepts | TacticalCodebook entries |
@@ -240,11 +268,12 @@
 
 | Cypher Operation | Internal Mechanism | Performance |
 |-----------------|-------------------|-------------|
-| `MATCH (n:Label)` | `scan(type_id, prefix)` on Arrow buffers | ~50ns L1 scent |
-| `WHERE n.prop = val` | `get(type_id, fingerprint)` | Content container SIMD |
-| `MATCH (a)-[:T]->(b)` | Inline edge walk (W16-31) + Bloom (W40-47) | ~14 cycles Belichtungsmesser |
-| `RETURN n.prop` | Container metadata word read | Zero-copy |
-| Vector similarity | `simd_scan(bucket)` → CAKES k-NN | ~10ms at 7PB scale |
+| `MATCH (n:Label)` | `0x200` → scent index scan on Arrow buffers | ~50ns L1 scent |
+| `WHERE n.prop = val` | `0x203` → fingerprint prefix match | Content container SIMD |
+| `MATCH (a)-[:T]->(b)` | `0x201` → inline edge walk (W16-31) + Bloom (W40-47) | ~14 cycles Belichtungsmesser |
+| `RETURN n.prop` | `0x2E0` → container metadata word read | Zero-copy |
+| `shortestPath(...)` | `0x260` → HammingMinPlus semiring | Sublinear via scent |
+| Vector similarity | `0x2C5` → `simd_scan(bucket)` → CAKES k-NN | ~10ms at 7PB scale |
 
 ---
 
