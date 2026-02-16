@@ -2,12 +2,14 @@
 
 > **Date**: 2026-02-16
 > **Reviewer**: Claude (Opus 4.6)
-> **Scope**: Four documents reviewed against four codebases
+> **Scope**: Six documents reviewed against four codebases
 > **Documents reviewed**:
 > 1. `INTEGRATION_ROADMAP.md` — 7-phase neo4j-rs roadmap
 > 2. `STRATEGY_INTEGRATION_PLAN.md` — StrategicNode unification across 4 repos
 > 3. `CAM_CYPHER_REFERENCE.md` — CAM address map (0x200-0x2FF) for Cypher ops
 > 4. `FINGERPRINT_ARCHITECTURE_REPORT.md` (ladybug-rs) — Technical debt, blocking resolution & tier analysis
+> 5. `COGNITIVE_RECORD_256.md` (ladybug-rs) — 256-word (2048-byte) unified CogRecord design
+> 6. `CLAM_HARDENING.md` (ladybug-rs) — CLAM tree integration for provable search guarantees
 >
 > **Codebases examined**:
 > - `neo4j-rs` — ~8,950 LOC Rust + 6,838 LOC docs
@@ -33,7 +35,8 @@ Key findings:
 - The `StorageBackend` trait is a well-designed integration seam (31 methods, clean DTOs)
 - Phase ordering respects dependencies correctly
 - **The ladybug-rs BindNode AoS→SoA refactor (Option C) is a prerequisite for Phase 4**
-- **12 specific risks and recommendations** identified below
+- **14 specific risks and recommendations** identified below
+- **The CogRecord 256-word redesign changes the LadybugBackend integration surface**
 - Effort estimates are reasonable but likely optimistic for Phases 3 and 4
 
 ---
@@ -304,6 +307,32 @@ as quick wins while the critical path advances.
     which path is taken. This MUST be fixed before LadybugBackend can safely
     round-trip fingerprints through neo4j-rs DTOs.
 
+11. **CogRecord 256-word redesign changes the integration contract**: The
+    COGNITIVE_RECORD_256.md document proposes a fundamentally new record
+    layout: 256 × u64 = 2,048 bytes per record, organized as 32 compartments
+    of 64 bytes (1 cache line) each. Structure (C0-C7) = 512 bytes,
+    Fingerprint (C8-C31) = 1,536 bytes = 192 words = 12,288 bits.
+    **This changes the LadybugBackend integration surface significantly**:
+    - Fingerprint width changes from 157 words (current) to 192 words (new)
+    - Adjacency is now bitvector-based (C1-C3) instead of inline edge words (W16-31)
+    - Labels become Bloom filter in structure, not separate metadata words
+    - Properties stored in Lance sidecar (unchanged), but node identity moves to
+      C0's `Addr(u16)` with LCRS tree pointers
+    - The CAM_CYPHER_REFERENCE.md container layout (§8) assumes the OLD 128-word
+      metadata layout; it needs updating to match the 256-word compartment design
+    - **Recommendation**: Update CAM_CYPHER_REFERENCE.md §8 and Phase 4 task
+      descriptions to reference the 32-compartment layout, not the old W0-W127 layout
+
+12. **CLAM tree hardening adds search quality guarantees**: The CLAM_HARDENING.md
+    document proposes replacing ad-hoc scent hierarchy with a CLAM tree that
+    provides O(k × 2^LFD × log n) proven complexity for k-NN search, plus
+    formal triangle-inequality pruning bounds. This is directly relevant to
+    neo4j-rs's `vector_query()` and `expand()` methods in LadybugBackend.
+    **The CentroidRadiusPercentile (CRP) distributions from the HDR-stacked
+    approach are particularly valuable** — they provide data-adaptive Mexican hat
+    thresholds per cluster, replacing hardcoded constants. For graph traversal,
+    this means each hop can use local cluster statistics for optimal pruning.
+
 ---
 
 ## 5. Recommendations
@@ -334,6 +363,8 @@ as quick wins while the critical path advances.
 | R10 | Answer Open Question 4: use direct Rust calls in-process, Arrow Flight cross-process | Matches existing ada-n8n patterns |
 | R11 | Land ladybug-rs BindNode SoA refactor (Option C) before Phase 4 | Eliminates cache-line contention; Phase 4 blocked without it |
 | R12 | Fix 156→157 fingerprint word split in ladybug-rs immediately | Silent data corruption; blocks correct LadybugBackend integration |
+| R13 | Update CAM_CYPHER_REFERENCE.md §8 to match CogRecord 256-word compartment layout | Old W0-W127 layout is being superseded by 32-compartment design |
+| R14 | Update Phase 4 LadybugBackend design to use C1-C3 bitvector adjacency | New design uses 512-bit bitvectors (C1/C2), not inline edge words (W16-31) |
 
 ---
 
@@ -360,56 +391,124 @@ achievable for a focused team. The phase ordering minimizes wasted work.
 
 ## 7. Cross-Document Consistency Matrix
 
-| Topic | Roadmap | Strategy Plan | CAM Reference | FP Architecture |
-|-------|:-------:|:------------:|:-------------:|:---------------:|
-| StorageBackend as seam | Yes | Yes | Yes | N/A |
-| Neo4j-rs keeps executor | Yes (Phase 2) | **No** (§6) | Implicit yes | N/A |
-| Neo4j-rs needs Bolt | Yes (Phase 3) | **No** (§6) | Implicit yes | N/A |
-| Container = node | Yes | Yes | Yes | Yes |
-| 8192-bit metadata + N x 8192 content | Assumed | Assumed | Yes (§8) | Yes (basis) |
-| W12-15 = 10 layers | Yes | Yes | Yes | N/A |
-| XOR edge algebra | Assumed | Yes (§2.1) | Yes (§6) | Yes (must preserve) |
-| BindNode needs SoA refactor | Not mentioned | Not mentioned | Not mentioned | **Yes (critical)** |
-| 156 vs 157 word bug | Not mentioned | Not mentioned | Not mentioned | **Yes (HIGH)** |
-| DN hash collisions | Not mentioned | Not mentioned | BiMap assumed safe | **Yes (HIGH)** |
+| Topic | Roadmap | Strategy Plan | CAM Reference | FP Architecture | CogRecord 256 | CLAM Hardening |
+|-------|:-------:|:------------:|:-------------:|:---------------:|:-------------:|:--------------:|
+| StorageBackend as seam | Yes | Yes | Yes | N/A | N/A | N/A |
+| Neo4j-rs keeps executor | Yes (Phase 2) | **No** (§6) | Implicit yes | N/A | N/A | N/A |
+| Neo4j-rs needs Bolt | Yes (Phase 3) | **No** (§6) | Implicit yes | N/A | N/A | N/A |
+| Container = node | Yes | Yes | Yes | Yes | Yes (2048B) | N/A |
+| Record layout | 128w meta + Nw content | 128w meta | 128w meta (§8) | 156/157w FP | **256w unified** | N/A |
+| Fingerprint width | Not specified | Not specified | Not specified | 156 or 157w | **192w (12,288 bits)** | 256w (16,384 bits) |
+| Edge storage | W16-31 inline | W16-31 inline | W16-31 inline | N/A | **C1-C3 bitvectors** | N/A |
+| W12-15 = 10 layers | Yes | Yes | Yes | N/A | C6 thinking weights | N/A |
+| XOR edge algebra | Assumed | Yes (§2.1) | Yes (§6) | Yes (preserve) | Yes (C8-C31) | Yes (preserve) |
+| BindNode needs SoA refactor | Not mentioned | Not mentioned | Not mentioned | **Yes** | **Yes (§12)** | N/A |
+| Scent index | Assumed | Assumed | Scent index scan | N/A | C7 expanded scent | **CLAM tree replaces** |
+| Search algorithm | Not specified | Not specified | HDR cascade | N/A | HDR cascade | **CAKES k-NN** |
 
 **Key inconsistencies to resolve**:
 1. Strategy Plan §6 vs. Roadmap Phases 2-3 (executor/Bolt scope)
-2. None of the neo4j-rs documents mention the ladybug-rs technical debt that blocks Phase 4
-3. The 156→157 word split is invisible to neo4j-rs but will cause silent corruption
-   at the LadybugBackend boundary
+2. CAM Reference §8 (128w layout) vs. CogRecord 256 (256w compartment layout)
+3. Fingerprint width: 156w (bind_space) vs 157w (core) vs 192w (CogRecord 256) vs 256w (CLAM)
+4. Edge storage: W16-31 inline edges (3 docs) vs C1-C3 bitvectors (CogRecord 256)
+5. Scent hierarchy: current scent index vs CLAM tree (CLAM Hardening)
+6. None of the neo4j-rs documents reference the CogRecord 256 design
 
 ---
 
-## 8. Conclusion
+## 8. Addendum: CogRecord 256-Word Design Impact on neo4j-rs
 
-The four documents together form a comprehensive, well-reasoned plan with one
-significant inconsistency (Strategy Plan §6 vs. Roadmap Phases 2-3) and one
-critical blind spot (ladybug-rs storage-layer technical debt not captured in
-neo4j-rs effort estimates).
+The COGNITIVE_RECORD_256.md document proposes a major redesign of the ladybug-rs
+storage primitive. This has direct implications for the neo4j-rs LadybugBackend:
 
-The architecture is sound: the StorageBackend trait as integration seam, typed
-views over CogRecord containers (8192-bit metadata + N x 8192-bit content),
-and CAM address routing are all correct design decisions.
+### 8.1 What Changes for LadybugBackend
 
-The Fingerprint Architecture Report adds essential context: Phase 4 cannot
-succeed until ladybug-rs completes the BindNode AoS→SoA refactor (Option C)
-and fixes the 156→157 word split. These prerequisites should be explicitly
-added to the Roadmap's Phase 4 "Prerequisites from ladybug-rs" table.
+| Aspect | Old (128w meta + Nw content) | New (256w unified) | Impact |
+|--------|------------------------------|---------------------|--------|
+| Record size | Variable | Fixed 2,048 bytes | Simpler |
+| Fingerprint | 157w (10,048 bits) | 192w (12,288 bits) | Wider FP, better algebra |
+| Edge storage | Inline words (W16-31) | 512-bit bitvectors (C1-C3) | Bucket-based, not direct |
+| Node identity | PackedDn in W0 | Addr(u16) in C0 w0 | 16-bit, not 64-bit |
+| Tree traversal | No built-in | LCRS pointers in C0 w5 | Free parent/child/sibling |
+| Labels | Bloom in W40-47 | Via structure bytes + label map | Different lookup |
+| Properties | Content container | Lance sidecar (unchanged) | Same |
+| NARS truth | W4-7 (float) | C5 (Q16.16 fixed-point, integer-only) | No float in hot path |
+| Graph adjacency | CSR + inline edges | C1 (out) + C2 (in) bitvectors | GraphBLAS-style |
+| Verb filtering | Scan edge types | C3 verb-type mask (1 bit per verb) | O(1) verb check |
 
-The biggest risks are:
-1. **Organizational** — coordinating changes across 4+ codebases with a single contributor
-2. **Sequential blocking** — ladybug-rs SoA refactor → LadybugBackend → Ecosystem unification
+### 8.2 What This Means for CAM_CYPHER_REFERENCE.md
 
-The vertical-slice recommendation (R9) and the ladybug-rs prerequisite sequencing
-(R11, R12) are the most important mitigations.
+The CAM reference's §8 ("Container Metadata Word Layout") describes the OLD
+128-word layout (W0-W127). With the CogRecord 256 design:
 
-**Bottom line**: The plan is credible. Fix the inconsistency in Strategy Plan §6,
-add the ladybug-rs prerequisites to Phase 4, and ship it.
+| CAM Operation | Old Routing | New Routing |
+|---------------|------------|-------------|
+| `MATCH (n:Label)` 0x200 | Scent index + W40-47 Bloom | C7 scent + structure label lookup |
+| `MATCH ()-[r:TYPE]->()` 0x201 | W16-31 inline edges | C1 out-bitvector + C3 verb mask |
+| `WHERE n.prop = val` 0x203 | Content container SIMD | Lance sidecar query |
+| `CREATE (n:Label {})` 0x220 | BindSpace write + fingerprint | CogRecord allocation + C8-C31 write |
+| `RETURN n.prop` 0x2E0 | Container metadata word read | C0-C7 structure read (64 bytes) |
+| `shortestPath(...)` 0x260 | HammingMinPlus semiring | C1/C2 BFS + C8-C31 Hamming |
+| `vector_query()` 0x2C5 | CAKES k-NN | CAKES via CLAM tree over C8-C31 |
+
+### 8.3 CLAM Hardening Impact
+
+The CLAM_HARDENING.md proposes replacing the ad-hoc scent hierarchy with a
+proper CLAM tree. For neo4j-rs:
+
+- `vector_query()` in LadybugBackend routes to CAKES k-NN with O(k × 2^LFD × log n) guarantee
+- `expand()` can use CLAM tree's d_min/d_max bounds for provable cluster pruning
+- CentroidRadiusPercentiles provide data-adaptive Mexican hat thresholds per cluster
+- LFD measurement gives actual pruning effectiveness metrics (not just design targets)
+- The HDR-stacked Belichtungsmesser approach *exceeds* CLAM's single-scalar radius
+
+**Key insight**: The CLAM integration is transparent to neo4j-rs. The
+`StorageBackend` trait abstraction means search algorithm changes in ladybug-rs
+(scent → CLAM) don't require any changes in neo4j-rs. The trait is doing its job.
+
+---
+
+## 9. Conclusion
+
+The six documents together form a comprehensive but actively evolving plan. The
+neo4j-rs roadmap and CAM reference are well-crafted but reference the OLD
+ladybug-rs record layout (128-word metadata). The CogRecord 256-word design
+represents the FUTURE of the storage layer and will supersede the current layout.
+
+**Critical consistency gaps**:
+1. Strategy Plan §6 vs. Roadmap Phases 2-3 (executor/Bolt scope)
+2. CAM Reference §8 vs. CogRecord 256 (128w vs 256w layout)
+3. Fingerprint width: 156/157w (current) → 192w (CogRecord 256)
+4. Edge model: inline edges (W16-31) → bitvector adjacency (C1-C3)
+5. Scent hierarchy: current → CLAM tree (formal guarantees)
+
+**What's solid**:
+- `StorageBackend` trait as integration seam — proven correct, future-proof
+- Phase ordering (1→2A→3→4→7) — correct dependencies
+- CogRecord 256 compartment design — elegant, SIMD-aligned, cache-optimal
+- CLAM hardening — transforms intuition into proofs
+- Typed views over containers — the right abstraction pattern
+
+**The biggest risk** is not any single technical decision — it's that the
+ladybug-rs storage layer is still actively being redesigned (128w → 256w,
+AoS → SoA, scent → CLAM) while neo4j-rs Phase 4 depends on a stable API.
+The `StorageBackend` trait insulates neo4j-rs from these changes, but the
+`LadybugBackend` implementation will need to track a moving target.
+
+**Recommendation**: Wait for the CogRecord 256-word design to land in
+ladybug-rs before starting Phase 4 LadybugBackend implementation. In the
+meantime, advance Phases 1-3 (functions, transactions, Bolt protocol) and
+parallel streams (indexes, GUI, TCK harness) which have no ladybug-rs
+dependency.
+
+**Bottom line**: The plan is credible and the architecture is sound. The
+ladybug-rs storage layer is in healthy flux — converging on a better design.
+Let it converge, then build Phase 4 against the stable API.
 
 ---
 
 *Review conducted against: neo4j-rs (main), crewai-rust (main), ada-n8n (main),
-aiwar-neo4j-harvest (main), ladybug-rs FINGERPRINT_ARCHITECTURE_REPORT.md.
-All source files read and verified. Container design: 8192-bit metadata (128 x u64)
-+ N x 8192-bit content containers (128 x u64) per CogRecord.*
+aiwar-neo4j-harvest (main), plus ladybug-rs documents: FINGERPRINT_ARCHITECTURE_REPORT.md,
+COGNITIVE_RECORD_256.md, CLAM_HARDENING.md. All source files read and verified.
+Current design: 8192-bit metadata (128 × u64) + N × 8192-bit containers (128 × u64).
+Proposed design: 256 × u64 = 2,048 bytes unified CogRecord (32 compartments × 64 bytes).*
