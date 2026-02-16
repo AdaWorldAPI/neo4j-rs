@@ -458,6 +458,25 @@ u33-u64       ~32 bit  Edge identity          Relationship IDs in neo4j-rs
 u65-u128      ~64 bit  Node identity          Full node address (PackedDn / DN path hash)
 ```
 
+### 8.2.1 Metadata Budget Allocation
+
+The 8192-bit metadata container is a **fixed zero-sum budget**. Every field
+competes for the same 8192 bits. The current plan allocates:
+
+- **u64 (64 bits)** for node identity — sufficient for any realistic workload
+- **u32 (32 bits)** for edge identity — 4 billion edges per entity, more than enough
+- **u16 (16 bits)** for commands/verbs — 65K ops, covers 144 verbs + CAM addresses
+- **Remaining ~8000 bits** for: NARS truth (C5), adjacency bitvectors (C1-C3),
+  LCRS tree pointers (C0), scent/popcount (C7), verb mask (C3), SPO sketch (C4),
+  semantic kernel memo (C6), ECC/parity
+
+**The trade-off**: If more cognitive features need to live in metadata (e.g.,
+additional thinking style weights, expanded NARS evidence buffers, extra
+adjacency dimensions), the budget must be re-partitioned. The u64 nodes +
+u32 edges allocation holds **unless something more important needs the space**.
+Since node and edge identity are foundational, this is unlikely to change
+unless a fundamentally different addressing scheme is adopted.
+
 **Implications for neo4j-rs LadybugBackend**:
 
 1. **`NodeId(u64)` maps to the u65-u128 range** — neo4j-rs's `NodeId` is correct
@@ -805,40 +824,102 @@ to "container", "bitpack*", and "512-byte". Results:
 | bitpack* | 10 | 30+ |
 | 512-byte | 7 | 50+ |
 
-### 13.2 Container Design Evolution (Three Generations)
+### 13.2 The Container Primitive — 8192-bit Universal Quantum
 
-The docs reveal three distinct container designs, each building on the previous:
+The fundamental design invariant across the entire ecosystem:
 
-**Generation 1 — CURRENT (ARCHITECTURE.md)**:
 ```
-Container = 128 × u64 = 8,192 bits = 1 KB
-CogRecord = meta_container (1 KB) + content_container (1 KB) = 2 KB
+┌──────────────────────────────────────────────────────────────────┐
+│  ALWAYS: 1 × 8192-bit METADATA container (128 × u64 = 1 KB)    │
+│  THEN:   N × 8192-bit CONTENT containers (polymorphic payload)  │
+│                                                                  │
+│  The metadata container is NON-NEGOTIABLE. Everything adheres    │
+│  to 8192-bit metadata. Content containers are flexible:          │
+│                                                                  │
+│  ├── N=1: bitpacked fingerprint (1 × 8192 = 8,192 bits)        │
+│  ├── N=2: CogRecord 256 (meta + content = 2 × 8192 = 2 KB)    │
+│  ├── N=3: 3D bitpacked vector (3 × 8192 = 24,576 bits)         │
+│  │         Each container = one spatial axis/dimension           │
+│  ├── N=k: 1024D Jina embedding packed into k containers         │
+│  └── N=arbitrary: any data that fits the 8192-bit block format  │
+└──────────────────────────────────────────────────────────────────┘
 ```
-- Used in production code today
-- `BindNode.fingerprint: [u64; 156]` (or 157 — the bug)
+
+**The 3D bitpacked vector** = 3 content containers of 8192 bits each. Each
+container represents one axis of a 3-dimensional bitpacked space. This is
+NOT a special case — it's the standard container system with N=3. The
+metadata container (always present) provides routing, scent, DN tree
+pointers, and NARS truth values regardless of what the content holds.
+
+**Why this matters for neo4j-rs**: The `LadybugBackend` doesn't need to know
+what's inside content containers. It always gets the metadata container
+(structure, labels, adjacency, NARS) for property graph operations. Content
+containers are only accessed for `vector_query()` and fingerprint operations.
+The container count N is a per-entity property, not a global constant.
+
+### 13.3 Container Configurations in the Documents
+
+The various documents describe specific CONFIGURATIONS of the N-container model:
+
+**Configuration: CogRecord 256 (N=1 content, 2 containers total)**:
+```
+metadata (8192 bits) = C0-C7 structure (32 compartments × 64B each, only 8 used)
+content  (8192 bits) = C8-C31 fingerprint (24 compartments × 64B)
+Total: 256 × u64 = 16,384 bits = 2 KB = 2 containers
+```
+- The COGNITIVE_RECORD_256.md design
+- 32 compartments (8 structure + 24 fingerprint) map onto 2 × 8192 blocks
+- LCRS tree pointers, 512-bit bitvector adjacency, Q16.16 NARS in metadata
+
+**Configuration: Current Production (N=1 content, 2 containers total)**:
+```
+metadata (8192 bits) = meta_container() → Container::view(fingerprint[..128])
+content  (8192 bits) = content_container() → Container::view(fingerprint[128..])
+Total: 2 × 8192 = 16,384 bits = 2 KB
+```
+- Used in production code today (ARCHITECTURE.md)
+- `BindNode.fingerprint: [u64; 156]` (or 157 — the bug) fits inside 2 containers
 - W0-W127 metadata layout with inline edges at W16-31
 
-**Generation 2 — PROPOSED (docs/HANDOVER.md)**:
+**Configuration: 3D Bitpacked Vector (N=3 content, 4 containers total)**:
 ```
-CogRecord = 256 × u64 = 16,384 bits = 2 KB
-Words 0-207: SEMANTIC fingerprint (13,312 bits)
-Words 208-255: METADATA
+metadata (8192 bits) = routing, scent, DN tree, NARS
+content  (3 × 8192 bits) = axis_x (8192) + axis_y (8192) + axis_z (8192)
+Total: 4 × 8192 = 32,768 bits = 4 KB
 ```
-- Intermediate proposal from 2026-02-06 refactoring session
-- Key constraints: max 32 edges, no floats, Hamming only, O(1) addressing
-- 5-phase refactoring plan: CogRecord → Expand FP → Replace BindNode → Lance → CogRedis
+- Spatial/embedding data requiring multi-axis representation
+- Each axis is a full 8192-bit bitpacked vector
+- Hamming distance computed per-axis or combined
 
-**Generation 3 — LATEST (COGNITIVE_RECORD_256.md)**:
+**Configuration: Jina 1024D (N varies)**:
 ```
-CogRecord = 256 × u64 = 16,384 bits = 2 KB
-32 compartments × 64 bytes (1 cache line each)
-C0-C7: STRUCTURE (512 bytes, 25%)
-C8-C31: FINGERPRINT (1,536 bytes = 192 words = 12,288 bits, 75%)
+metadata (8192 bits) = standard routing + NARS
+content  (N × 8192 bits) = 1024 float32 dimensions packed into containers
+1024 × 32 bits = 32,768 bits = 4 containers
+Total: 5 × 8192 = 40,960 bits = 5 KB
 ```
-- The most detailed and mature design
-- Introduces compartmented layout with cache-line alignment
-- LCRS tree pointers, 512-bit bitvector adjacency, Q16.16 NARS
-- SoA canonical (CogColumns + Arrow) with AoS view (CogView)
+
+### 13.4 Implications for the Review
+
+This corrects several assumptions in the earlier sections:
+
+1. **Section 8 (CogRecord 256)**: The CogRecord 256 is a specific N=1 configuration,
+   not "the" container design. The 32-compartment layout maps onto 2 × 8192 blocks.
+
+2. **Section 14 (FP width reconciliation)**: The fingerprint width is NOT fixed at
+   160w or 192w — it depends on how many content containers a given entity has.
+   The 160w Arrow representation is the SINGLE-CONTAINER fingerprint column.
+   Multi-container entities (3D vectors, Jina embeddings) have multiple fingerprint
+   columns or a variable-length representation.
+
+3. **LadybugBackend design**: `get_node()` always returns the metadata container.
+   `vector_query()` must specify WHICH content containers to search (axis 0? all 3?).
+   The `BackendCapabilities` should advertise the container configurations supported.
+
+4. **Arrow schema**: Schema A works for N=1 (single `FixedSizeBinary(1280)` fingerprint
+   column). For N>1, either use multiple fingerprint columns (`fp_axis_0`, `fp_axis_1`,
+   `fp_axis_2`) or a `FixedSizeList` of containers. Schema B (hot/cold split) becomes
+   more attractive for multi-container entities since the hot routing batch stays narrow.
 
 ### 13.3 BitpackedCSR — The Graph Topology Primitive
 
@@ -915,37 +996,43 @@ two Container views (meta + content). The CogRecord 256 replaces this with
 
 ---
 
-## 14. Fingerprint Width Reconciliation
+## 14. Fingerprint Width Reconciliation (Container-Aware)
 
-Across all 10 documents, there are now **5 different fingerprint widths**.
-Here's how they reconcile:
+The fundamental unit is the **8192-bit container** (128 × u64 = 1 KB). All
+fingerprint widths are multiples or subsets of this quantum:
 
-| Source | Width | Bits | Purpose |
-|--------|-------|------|---------|
-| BindNode (current code) | 156 words | 9,984 | Bug — should be 157 |
-| Fingerprint (current code) | 157 words | 10,048 | Core struct, 5-word SIMD tail |
-| **Arrow schema (COMPOSITE)** | **160 words** | **10,240** | **SIMD-clean (20 AVX-512 iters)** |
-| CogRecord 256 (C8-C31) | 192 words | 12,288 | In-memory compartmented layout |
-| CLAM / ARCHITECTURE.md | 256 words | 16,384 | Full container width (theoretical max) |
+| Source | Width | Bits | Containers | Purpose |
+|--------|-------|------|:----------:|---------|
+| BindNode (current code) | 156 words | 9,984 | ~1.2 | Bug — should be 157 |
+| Fingerprint (current code) | 157 words | 10,048 | ~1.2 | Core struct, 5-word SIMD tail |
+| **Arrow schema (COMPOSITE)** | **160 words** | **10,240** | **~1.25** | **SIMD-clean per-container column** |
+| CogRecord 256 content (C8-C31) | 192 words | 12,288 | 1.5 | In-memory compartmented (N=1 config) |
+| Single container | 128 words | 8,192 | **1** | **One content container** |
+| 3D bitpacked vector | 384 words | 24,576 | **3** | **Three content containers** |
+| Full CogRecord 256 | 256 words | 16,384 | **2** | Metadata + 1 content container |
 
-**Resolution**: These are NOT conflicts — they're different views of the same data:
+**Resolution**: The 8192-bit container is the invariant. Everything else is a
+configuration of N containers:
 
-1. **Arrow on-disk**: 160 words (FixedSizeBinary(1280)) — the canonical persistent
-   representation. 10,000 semantic bits + 240 ECC bits. SIMD-aligned.
+1. **Metadata container (8192 bits)**: ALWAYS present. Contains structure (W0-W127):
+   DN tree, adjacency, NARS, scent, labels. This is the non-negotiable foundation.
 
-2. **CogRecord in-memory**: C8-C31 = 192 words — adds 32 words of padding/expansion
-   beyond the 160-word Arrow column. These extra 32 words (2,048 bits) can hold
-   pre-computed sketch data, cached popcount, or future expansion.
+2. **Content container(s) (N × 8192 bits)**: Polymorphic payload. For bitpacked
+   fingerprints, N=1 gives 8192 bits. For 3D vectors, N=3 gives 24,576 bits.
+   For Jina 1024D, N=4 gives 32,768 bits.
 
-3. **Full container**: 256 words = entire CogRecord including structure (C0-C7).
-   Not a "fingerprint width" — it's the full record width.
+3. **Arrow on-disk**: FP_WORDS = 160 is the SIMD-aligned representation of the
+   *semantic portion* of ONE content container (10,000 data + 240 ECC). Multi-
+   container entities use multiple Arrow columns or a list column.
 
-4. **BindNode 156/157**: Legacy bug. Both replaced by 160-word Arrow representation
-   after the SoA refactor.
+4. **BindNode 156/157**: Legacy layout within a single content container. Replaced
+   by container-aligned storage after the SoA refactor.
 
-**Recommendation R16**: Standardize on `FP_WORDS = 160` as the canonical
-fingerprint width. Document that CogRecord C8-C31 (192 words) includes 160
-semantic + 32 auxiliary. This eliminates confusion across all documents.
+**Recommendation R16 (revised)**: Standardize on **8192-bit container** as the
+fundamental unit. Document that FP_WORDS=160 is the Arrow column width for a
+single content container. Multi-container entities (3D vector, Jina) use
+N × FP_WORDS columns or a variable-length representation. The metadata container
+width is always 128 words (8192 bits, non-negotiable).
 
 ---
 
@@ -1073,6 +1160,8 @@ STRATEGY_INTEGRATION_PLAN.md, CAM_CYPHER_REFERENCE.md, FINGERPRINT_ARCHITECTURE_
 COGNITIVE_RECORD_256.md, CLAM_HARDENING.md, COMPOSITE_FINGERPRINT_SCHEMA.md,
 GEL_EXECUTION_FABRIC.md, WIRING_PLAN_NEO4J_LADYBUG.md, GEL_STORAGE_ARCHITECTURE.md.
 All source files and 1,186-line Cypher dataset read and verified.
-Current design: 8192-bit container (128 × u64) + variable content containers.
-Proposed design: 256 × u64 = 2,048 bytes CogRecord (32 compartments × 64 bytes).
-Arrow canonical: FP_WORDS = 160 (10,240 bits, SIMD-clean).*
+Fundamental primitive: 8192-bit container (128 × u64 = 1 KB). Always 1 metadata
+container (non-negotiable) + N content containers (polymorphic: bitpacked, 3D vector,
+Jina 1024D, etc.). CogRecord 256 = N=1 configuration (2 containers, 2 KB).
+Metadata budget: u64 nodes + u32 edges + cognitive features share 8192 bits.
+Arrow canonical: FP_WORDS = 160 per content container (10,240 bits, SIMD-clean).*
