@@ -4,6 +4,11 @@
 > **Scope**: neo4j-rs + ladybug-rs + holograph trinity
 > **Principle**: The StorageBackend trait is the integration seam. All backends
 > speak the same contract. All Cypher works identically on every backend.
+>
+> **See also**:
+> - [`CAM_CYPHER_REFERENCE.md`](CAM_CYPHER_REFERENCE.md) — Full CAM address map (0x200–0x2FF) for Cypher ops
+> - [`GUI_PLAN.md`](GUI_PLAN.md) — egui/eframe GUI architecture and panel layout
+> - [`FEATURE_MATRIX.md`](FEATURE_MATRIX.md) — Current feature status scorecard
 
 ---
 
@@ -133,6 +138,9 @@ neo4j-rs                          External Neo4j 5.x
 
 **Goal**: Implement `StorageBackend` for ladybug-rs with CAM-addressed containers.
 
+> **Full CAM address reference**: [`CAM_CYPHER_REFERENCE.md`](CAM_CYPHER_REFERENCE.md)
+> Source: `ladybug-rs/src/learning/cam_ops.rs` (4776 lines, 4096 ops, Cypher at 0x200–0x2FF)
+
 ### Architecture
 ```
 neo4j-rs Cypher Query
@@ -213,6 +221,8 @@ neo4j-rs Cypher Query
 ---
 
 ## Phase 5: GUI + Developer Tools (0%)
+
+> **Full GUI architecture**: [`GUI_PLAN.md`](GUI_PLAN.md) — egui/eframe panels, async bridge, qualia heatmap
 
 **Goal**: Provide visual graph exploration and query tooling.
 
