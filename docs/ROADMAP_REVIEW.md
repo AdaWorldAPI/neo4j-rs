@@ -19,7 +19,7 @@
 > - `neo4j-rs` — ~8,950 LOC Rust + 6,838 LOC docs
 > - `crewai-rust` — ~60,770 LOC Rust, 265 source files
 > - `ada-n8n` — ~4,810 LOC Rust + 765 LOC workflows
-> - `aiwar-neo4j-harvest` — ~1,570 LOC Rust + 1,186 lines Cypher + generated JSON
+> - `aiwar-neo4j-harvest` — ~1,570 LOC Rust + 1,186 lines Cypher + generated JSON (general-purpose knowledge graph platform)
 > - `ladybug-rs` — 69 docs, ~4,485 LOC fabric module, full cognitive substrate
 
 ---
@@ -201,11 +201,16 @@ This is a solid foundation.
 
 ### 2.4 aiwar-neo4j-harvest — Integration Readiness
 
+> **General-purpose platform**: Despite the name, aiwar-neo4j-harvest is designed
+> for any domain — chess, geopolitics, technology ecosystems, supply chains, etc.
+> The 12-axis ontology and verb-as-property pattern generalize naturally.
+
 | Aspect | Status | Implication |
 |--------|--------|-------------|
 | Uses `neo4rs` (external crate) | **Yes** | Uses the neo4j-labs driver, NOT neo4j-rs |
 | Generates Cypher scripts | **Yes** | 143 KB of generated `.cypher` files |
 | Knowledge graph schema | **Mature** | 221 nodes, 356 edges, 12-axis ontology |
+| Domain scope | **Multi-domain** | Chess, AI warfare, geopolitics — schema is domain-agnostic |
 | Bridge to TacticalCodebook | **Designed** | Strategy Plan §4.3 maps concepts |
 
 **Key finding**: This repo demonstrates that the AI War knowledge graph schema
@@ -762,6 +767,13 @@ plan's Gap 1 implementation must be aware of this operator.
 
 ## 12. aiwar_full.cypher — Real-World Dataset Review
 
+> **Scope note**: The aiwar-neo4j-harvest repository is a **general-purpose
+> knowledge graph platform**, not limited to AI warfare research. Planned domains
+> include chess, geopolitical analysis, technology ecosystems, and any domain that
+> benefits from rich relationship modeling. The "aiwar" name reflects its origin
+> use case, but the schema, verb model, and container architecture are designed
+> to be domain-agnostic.
+
 ### 12.1 Dataset Statistics
 
 | Metric | Value |
@@ -1201,6 +1213,8 @@ width is always 128 words (8192 bits, non-negotiable).
 | R20 | Tiered access in `get_node()`: T0 only for property queries, T1-T2 lazy | GEL Storage Architecture | 3 days |
 | R21 | Handle string IDs → NodeId(u64) via deterministic hash for aiwar compat | aiwar_full.cypher string IDs | 2 hrs |
 | R22 | Handle `nan` property values in fingerprinting (skip, zero, or explicit) | aiwar `value: 'nan'` pattern | 2 hrs |
+| R23 | Prioritize `DataEnvelope` → `lb.*` step routing as first end-to-end integration test | Orchestration loop analysis | 3 days |
+| R24 | Document inner dialogue → hydration feedback loop as first-class architecture concept | Orchestration loop analysis | 4 hrs |
 
 ### 16.2 Updated Priority Order
 
@@ -1230,6 +1244,10 @@ PHASE 4 (LadybugBackend):
   R19 HdrCascadeExec for vector_query()
   R20 Tiered access pattern
 
+ORCHESTRATION LOOP:
+  R23 DataEnvelope → lb.* end-to-end integration test
+  R24 Document inner dialogue → hydration feedback loop
+
 STRATEGIC:
   R6  Split StorageBackend into core + extensions
   R7  BTree indexes in parallel with Phase 2A
@@ -1238,11 +1256,160 @@ STRATEGIC:
 
 ---
 
-## 17. Conclusion (Updated)
+## 17. Full Orchestration Loop — n8n → GEL → ladybug-rs → crewai-rs
+
+### 17.1 The Runtime Topology
+
+The five codebases form a complete cognitive orchestration loop:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     ada-n8n (Orchestration)                        │
+│  DataEnvelope + UnifiedStep → workflow triggers, routing, retry    │
+│  ┌───────────────┐   ┌────────────────┐   ┌──────────────────┐    │
+│  │ n8n workflow   │──▶│ lb.* step      │──▶│ crew.* step      │    │
+│  │ (DAG trigger)  │   │ (ladybug route)│   │ (crewai route)   │    │
+│  └───────────────┘   └───────┬────────┘   └────────┬─────────┘    │
+└──────────────────────────────┼─────────────────────┼──────────────┘
+                               │                     │
+                               ▼                     ▼
+┌──────────────────────────────────────┐  ┌─────────────────────────┐
+│  ladybug-rs (Resonance Engine)       │  │ crewai-rust (Dialogue)  │
+│                                      │  │                         │
+│  GEL Execution Fabric:               │  │ Inner loop:             │
+│  ┌──────────┐  ┌───────────────────┐ │  │ ┌─────────────────────┐│
+│  │ GEL CPU  │  │ HdrCascadeExec    │ │  │ │ inner_loop.rs       ││
+│  │ 9 langs  │──│ L0→L1→L2→L3→L4   │ │  │ │ persona dialogue    ││
+│  │ 4,485LOC │  │ scent→pop→sketch  │ │  │ │ self_modify         ││
+│  └──────────┘  │  →hamming→mexican │ │  │ └──────────┬──────────┘│
+│                └───────────────────┘ │  │            │            │
+│  SpineCache + DN Tree:               │  │ Fanout:    ▼            │
+│  ┌──────────────────────────────┐    │  │ ┌─────────────────────┐│
+│  │ CogRecord 256 containers     │    │  │ │ meta-agent          ││
+│  │ 8192-bit metadata + N×8192   │◀───│──│ │ multi-agent tasks   ││
+│  │ CAM / bitpacked / Jina hybrid│    │  │ │ crystallization     ││
+│  └──────────────────────────────┘    │  │ └─────────────────────┘│
+│                                      │  │                         │
+│  StorageBackend (neo4j-rs trait):     │  │ POST /api/v1/hydrate   │
+│  ┌──────────────────────────────┐    │  │ (HTTP to ladybug-rs)   │
+│  │ LadybugBackend               │    │  │                         │
+│  │ Neo4j-faithful Cypher        │    │  └─────────────────────────┘
+│  │ + ladybug.* procedures       │    │
+│  └──────────────────────────────┘    │
+└──────────────────────────────────────┘
+         │                    ▲
+         ▼                    │
+┌──────────────────────────────────────┐
+│  neo4j-rs (Query Engine)             │
+│  openCypher parse → plan → execute   │
+│  StorageBackend trait (31+5 methods)  │
+└──────────────────────────────────────┘
+         │                    ▲
+         ▼                    │
+┌──────────────────────────────────────┐
+│  aiwar-neo4j-harvest                 │
+│  (Knowledge Graph Platform)          │
+│  Chess, AI warfare, geopolitics...   │
+│  Domain-agnostic schema + verb model │
+└──────────────────────────────────────┘
+```
+
+### 17.2 The Orchestration Flow
+
+The loop operates as follows:
+
+1. **n8n triggers** (ada-n8n): External event or schedule fires a workflow.
+   The `DataEnvelope` carries context + step routing instructions.
+
+2. **GEL execution** (ladybug-rs): The `lb.*` step routes into the GEL
+   execution fabric. GEL is Graph Executable Language — a cognitive CPU
+   with 9 language families that operates on CogRecord containers. The
+   HdrCascadeExec pipeline (scent → popcount → sketch → Hamming → Mexican
+   hat) performs resonance-based search: the query IS the fingerprint, and
+   matching is pure integer arithmetic (no FPU).
+
+3. **Resonance-based thinking** (ladybug-rs): Unlike traditional query
+   engines that match predicates, ladybug-rs finds **resonance** —
+   fingerprint similarity in Hamming space. This is fundamentally
+   associative: "what reminds me of this?" rather than "what matches
+   this predicate?". The SpineCache + DN tree provides O(1) navigation
+   via XOR/unbind to walk the concept hierarchy.
+
+4. **Inner dialogue** (crewai-rust): The resonance results feed into
+   crewai-rust's inner loop (`inner_loop.rs`). Persona-based agents
+   conduct internal dialogue — deliberation, self-modification,
+   crystallization of new beliefs. This is the "thinking" layer.
+
+5. **Fanout** (crewai-rust): The meta-agent orchestrator fans out
+   multi-agent tasks. Each sub-agent can hydrate back to ladybug-rs
+   via `POST /api/v1/hydrate`, enriching the knowledge graph with
+   new insights, updated fingerprints, and relationship discoveries.
+
+6. **Loop back** (ada-n8n): Results flow back into the n8n workflow
+   for the next step — which may trigger another ladybug resonance
+   query, another crewai dialogue round, or external actions
+   (notifications, API calls, database writes).
+
+### 17.3 How Each Codebase Contributes
+
+| Codebase | Role in Loop | Key Primitive |
+|----------|-------------|---------------|
+| **ada-n8n** | Orchestration & routing | `DataEnvelope` + `UnifiedStep` |
+| **ladybug-rs** | Resonance engine & GEL CPU | CogRecord 256 containers, HdrCascadeExec |
+| **neo4j-rs** | Query interface (Cypher faithful) | `StorageBackend` trait (31+5 methods) |
+| **crewai-rust** | Inner dialogue & agent fanout | `inner_loop.rs`, meta-agent orchestration |
+| **aiwar-neo4j-harvest** | Domain data & schema | 12-axis ontology, verb-as-property model |
+
+### 17.4 Contract Boundaries in the Loop
+
+The loop is clean because each codebase has a well-defined contract boundary:
+
+- **ada-n8n ↔ ladybug-rs**: Service-level (`LADYBUG_ENDPOINT`, `lb.*` step routing).
+  The `DataEnvelope` is the wire format. Zero compile-time coupling.
+- **ada-n8n ↔ crewai-rust**: Service-level (`crew.*` step routing).
+  Same `DataEnvelope` wire format.
+- **crewai-rust ↔ ladybug-rs**: HTTP (`POST /api/v1/hydrate`).
+  crewai-rust never touches CogRecords directly — it hydrates through
+  the API boundary.
+- **neo4j-rs ↔ ladybug-rs**: Trait-level (`StorageBackend` + `LadybugBackend`).
+  The only compile-time coupling in the system. Clean because the
+  wiring plan's 5 additions all have default implementations.
+- **aiwar-neo4j-harvest ↔ neo4j-rs**: Cypher-level (`.cypher` scripts).
+  Currently uses `neo4rs` (external driver); migration to neo4j-rs
+  means same Cypher scripts, different backend.
+
+### 17.5 Implications for the Roadmap
+
+The orchestration loop confirms the Phase ordering is correct:
+
+- **Phase 1-2** (parser, executor): Required before neo4j-rs can serve as
+  the Cypher query interface for the loop.
+- **Phase 3** (Bolt/wire): Not needed for the loop — ada-n8n and crewai-rust
+  connect to ladybug-rs directly, not through neo4j-rs wire protocol.
+- **Phase 4** (LadybugBackend): The critical integration point. Once this
+  works, the full loop is operational.
+- **Phase 7A-C** (unified runtime): Tightens the loop by replacing HTTP
+  calls with in-process trait calls where possible.
+
+**Recommendation R23**: Prioritize the ada-n8n `DataEnvelope` → ladybug-rs
+`lb.*` step routing path as the first end-to-end integration test. This
+exercises the n8n → GEL → resonance path without requiring crewai-rust,
+and validates that the orchestration layer can drive the cognitive engine.
+
+**Recommendation R24**: Document the inner dialogue → hydration feedback
+loop explicitly: crewai-rust agent crystallizes a new belief → calls
+`POST /api/v1/hydrate` → ladybug-rs updates CogRecord → next resonance
+query reflects the new knowledge. This is the learning loop and should be
+a first-class concept in the architecture docs.
+
+---
+
+## 18. Conclusion (Updated)
 
 The ten documents together form a comprehensive, actively evolving plan. With
-the addition of the Wiring Plan, Composite Schema, GEL architecture, and the
-real aiwar dataset, the ecosystem picture is now substantially more complete.
+the addition of the Wiring Plan, Composite Schema, GEL architecture, the
+real aiwar dataset, and the full orchestration loop analysis, the ecosystem
+picture is now complete from data through orchestration.
 
 **Critical consistency gaps** (3 remain):
 1. Strategy Plan §6 vs. Roadmap Phases 2-3 (executor/Bolt scope)
@@ -1251,28 +1418,35 @@ real aiwar dataset, the ecosystem picture is now substantially more complete.
 
 **What's solid** (expanded):
 - `StorageBackend` trait as integration seam — proven correct, 5 clean extensions
-- Phase ordering (1→2A→3→4→7) — correct dependencies
+- Phase ordering (1→2A→3→4→7) — correct dependencies, confirmed by orchestration loop analysis
 - CogRecord 256 compartment design — elegant, SIMD-aligned, cache-optimal
 - CLAM hardening — transforms intuition into proofs
 - Composite fingerprint schema — FP_WORDS=160 resolves all width confusion
 - Wiring plan — clean translation layer, 10 registered procedures, dual-path traversal
 - GEL tiered storage — T0/T1/T2 maps cleanly to property/search/full-fingerprint access
-- aiwar_full.cypher — real dataset proving the schema supports complex real-world graphs
+- aiwar_full.cypher — real dataset proving the schema supports complex real-world graphs (chess, geopolitics, AI warfare, and beyond)
 - **ladybug-rs openCypher/GQL and NARS are currently stable and testable**
+- **Full orchestration loop**: n8n (routing) → GEL (resonance) → crewai-rs (dialogue/fanout) → hydrate back — all contract boundaries are clean and well-defined
 
 **The contract is sound**: neo4j-rs stays 100% Neo4j faithful. ladybug-rs
 implements StorageBackend faithfully. The translation layer is deterministic
-and configurable. Cognitive operations are CALL-only, never default.
+and configurable. Cognitive operations are CALL-only, never default. The
+orchestration loop (ada-n8n → ladybug-rs → crewai-rust → hydrate back)
+uses service-level contracts with zero compile-time coupling except at the
+neo4j-rs ↔ ladybug-rs trait boundary.
 
 **The revised strategy**: Don't wait — test early. Use aiwar_full.cypher as
 the acceptance test. Build a minimal LadybugBackend prototype alongside
-Phases 1-2. Feed findings back into the CogRecord 256 design. Stability
-comes from exercising the contract, not from waiting for it to freeze.
+Phases 1-2. Wire the `DataEnvelope` → `lb.*` path early to validate the
+orchestration loop. Feed findings back into the CogRecord 256 design.
+Stability comes from exercising the contract, not from waiting for it to freeze.
 
-**Bottom line**: 10 documents, 5 codebases, 22 recommendations, 3 remaining
-gaps. The architecture is coherent, the contract is clean, and the first
-real dataset (aiwar) is ready to serve as the integration test suite.
-Start building.
+**Bottom line**: 10 documents, 5 codebases, 24 recommendations, 3 remaining
+gaps. The architecture is coherent, the contracts are clean at every boundary,
+the orchestration loop is well-defined (n8n triggers → GEL resonance →
+crewai-rs inner dialogue → fanout → hydrate back), and the first real
+dataset (aiwar — a general-purpose knowledge graph platform) is ready to
+serve as the integration test suite. Start building.
 
 ---
 
@@ -1286,4 +1460,8 @@ Fundamental primitive: 8192-bit container (128 × u64 = 1 KB). Always 1 metadata
 container (non-negotiable) + N content containers (polymorphic: bitpacked, 3D vector,
 Jina 1024D, etc.). CogRecord 256 = N=1 configuration (2 containers, 2 KB).
 Metadata budget: u64 nodes + u32 edges + cognitive features share 8192 bits.
-Arrow canonical: FP_WORDS = 160 per content container (10,240 bits, SIMD-clean).*
+Arrow canonical: FP_WORDS = 160 per content container (10,240 bits, SIMD-clean).
+Orchestration loop: ada-n8n (DataEnvelope routing) → ladybug-rs (GEL resonance-based
+thinking) → crewai-rust (inner dialogue + fanout) → hydrate back to ladybug-rs.
+aiwar-neo4j-harvest is a general-purpose knowledge graph platform (chess, geopolitics,
+AI warfare, technology ecosystems).*
