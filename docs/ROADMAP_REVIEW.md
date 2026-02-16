@@ -468,14 +468,87 @@ proper CLAM tree. For neo4j-rs:
 
 ---
 
-## 9. Conclusion
+## 9. Revised Recommendation: Test Early, Don't Wait
 
-The six documents together form a comprehensive but actively evolving plan. The
-neo4j-rs roadmap and CAM reference are well-crafted but reference the OLD
-ladybug-rs record layout (128-word metadata). The CogRecord 256-word design
-represents the FUTURE of the storage layer and will supersede the current layout.
+> **Amendment (2026-02-16)**: The original recommendation was "wait for CogRecord
+> 256 to land before starting Phase 4." This has been revised based on feedback:
+> stability comes from exercising the contract early, not from waiting passively.
 
-**Critical consistency gaps**:
+The ladybug-rs storage layer is currently stable. openCypher/GQL queries work.
+NARS inference works. The only reason it *would* become unstable is if integration
+testing reveals mismatches late — the exact problem early testing prevents.
+
+### 9.1 Why Test Now
+
+1. **The contract shapes the design**: Running real openCypher queries through
+   LadybugBackend NOW tells you which compartments need adjustment before the
+   256-word layout solidifies. If you wait, the layout freezes without being
+   informed by Cypher workloads — then you discover mismatches too late.
+
+2. **NARS is stable and ready**: C5 (NARS belief state) with Q16.16 fixed-point
+   is well-defined. Testing `WHERE nars_confidence > 0.5` through the
+   StorageBackend → LadybugBackend → C5 path validates the integer-only design
+   decision against real query patterns. If it breaks, better to know now.
+
+3. **GQL pattern matching is the acid test**: `MATCH (a)-[:CAUSES]->(b)` through
+   C1 (adjacency-OUT) + C3 (verb-type mask) is where bitvector adjacency either
+   proves itself or reveals bucket collision problems. This validation must
+   happen BEFORE the CogRecord 256 design is committed.
+
+4. **Future-proofing = knowing what to adjust**: You don't future-proof by
+   avoiding the integration surface. You future-proof by hitting it hard, finding
+   the friction points, and feeding that back into the design while it's still
+   malleable.
+
+### 9.2 Revised Phase 4 Strategy
+
+Instead of the original "wait then build" approach:
+
+```
+ORIGINAL (passive):
+  Phase 1-3 (neo4j-rs only) → Wait for ladybug-rs to stabilize → Phase 4
+
+REVISED (active):
+  Phase 1-2 (neo4j-rs) + Early LadybugBackend prototype (in parallel)
+  │
+  ├── Run openCypher TCK subset through LadybugBackend against CURRENT layout
+  ├── Run NARS inference queries (C5 round-trip validation)
+  ├── Run GQL traversal patterns (C1-C3 bitvector adjacency)
+  ├── Feed findings back into CogRecord 256 design
+  │
+  └── Phase 4 (full LadybugBackend) now builds on validated contract
+```
+
+The prototype doesn't need to be complete — a minimal LadybugBackend that
+implements `create_node()`, `get_node()`, `create_relationship()`,
+`get_relationships()`, and `nodes_by_label()` is enough to validate the
+integration surface.
+
+### 9.3 Specific Early Tests
+
+| Test | What It Validates | Compartments Exercised |
+|------|-------------------|----------------------|
+| `CREATE (n:Person {name: 'Ada'})` | Node allocation + Lance sidecar | C0, C8-C31 |
+| `MATCH (n:Person) RETURN n` | Label lookup + DTO round-trip | C0, C7 (scent) |
+| `CREATE (a)-[:KNOWS]->(b)` | Edge storage in bitvectors | C1, C2, C3 |
+| `MATCH (a)-[:KNOWS]->(b) RETURN b` | Bitvector traversal + verb mask | C1, C3 |
+| `WHERE n.confidence > 0.5` | NARS Q16.16 fixed-point query | C5 |
+| `MATCH p = (a)-[*1..3]->(b)` | Multi-hop BFS on bitvectors | C1, C2 |
+| Hamming similarity search | HDR cascade / CAKES k-NN | C7, C8-C31 |
+
+Each failing test is a design signal, not a bug. The earlier you get these
+signals, the more time you have to adjust the CogRecord layout before it
+hardens.
+
+---
+
+## 10. Conclusion
+
+The six documents together form a comprehensive, actively evolving plan. The
+architecture is sound, the phase ordering is correct, and the StorageBackend
+trait is proving its worth as an integration seam.
+
+**Critical consistency gaps** (unchanged):
 1. Strategy Plan §6 vs. Roadmap Phases 2-3 (executor/Bolt scope)
 2. CAM Reference §8 vs. CogRecord 256 (128w vs 256w layout)
 3. Fingerprint width: 156/157w (current) → 192w (CogRecord 256)
@@ -488,22 +561,16 @@ represents the FUTURE of the storage layer and will supersede the current layout
 - CogRecord 256 compartment design — elegant, SIMD-aligned, cache-optimal
 - CLAM hardening — transforms intuition into proofs
 - Typed views over containers — the right abstraction pattern
+- **ladybug-rs openCypher/GQL and NARS are currently stable and testable**
 
-**The biggest risk** is not any single technical decision — it's that the
-ladybug-rs storage layer is still actively being redesigned (128w → 256w,
-AoS → SoA, scent → CLAM) while neo4j-rs Phase 4 depends on a stable API.
-The `StorageBackend` trait insulates neo4j-rs from these changes, but the
-`LadybugBackend` implementation will need to track a moving target.
+**The revised strategy**: Don't wait for the storage layer to stabilize — make
+it stable by testing the integration surface early. Build a minimal
+LadybugBackend prototype alongside Phases 1-2 and run real Cypher/GQL/NARS
+queries through it. Feed the results back into the CogRecord 256 design. This
+turns the "moving target" risk into a feedback loop that drives convergence.
 
-**Recommendation**: Wait for the CogRecord 256-word design to land in
-ladybug-rs before starting Phase 4 LadybugBackend implementation. In the
-meantime, advance Phases 1-3 (functions, transactions, Bolt protocol) and
-parallel streams (indexes, GUI, TCK harness) which have no ladybug-rs
-dependency.
-
-**Bottom line**: The plan is credible and the architecture is sound. The
-ladybug-rs storage layer is in healthy flux — converging on a better design.
-Let it converge, then build Phase 4 against the stable API.
+**Bottom line**: The plan is credible and the architecture is sound. Start
+testing the integration now — stability is earned through exercise, not patience.
 
 ---
 
