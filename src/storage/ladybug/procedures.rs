@@ -28,6 +28,10 @@ pub static PROCEDURE_NAMES: &[&str] = &[
     "ladybug.deduction",    // NARS deduction: A→B, B→C ⊢ A→C
     "ladybug.crystallize",  // Mark a belief as frozen (high confidence)
     "ladybug.spine",        // XOR-fold query over subtree
+    "ladybug.spo.trace",    // Compute SPO holographic trace
+    "ladybug.spo.recover",  // Recover missing SPO component via XOR
+    "ladybug.abduction",    // NARS abduction: A→B, B ⊢ A (weak)
+    "ladybug.induction",    // NARS induction: A, A→B ⊢ A→B (generalise)
 ];
 
 /// Dispatch a procedure call to the appropriate handler.
@@ -45,8 +49,12 @@ pub fn dispatch(
         "ladybug.truth" => proc_truth(args),
         "ladybug.revision" => proc_revision(args),
         "ladybug.deduction" => proc_deduction(args),
+        "ladybug.abduction" => proc_abduction(args),
+        "ladybug.induction" => proc_induction(args),
         "ladybug.crystallize" => proc_crystallize(args),
         "ladybug.spine" => proc_spine(args, nodes),
+        "ladybug.spo.trace" => super::spo::proc_spo_trace(args),
+        "ladybug.spo.recover" => super::spo::proc_spo_recover(args),
         _ => Err(Error::ExecutionError(format!("Unknown procedure: {name}"))),
     }
 }
@@ -252,6 +260,56 @@ fn proc_deduction(args: &[Value]) -> Result<ProcedureResult> {
 
     Ok(ProcedureResult {
         columns: vec!["frequency".to_string(), "confidence".to_string()],
+        rows: vec![row],
+    })
+}
+
+/// ladybug.abduction(f1, c1, f2, c2) → abduced truth value
+/// NARS abduction: A→B, B ⊢ A (weak inference)
+fn proc_abduction(args: &[Value]) -> Result<ProcedureResult> {
+    let f1 = args.first().and_then(|v| v.as_float()).unwrap_or(0.5);
+    let c1 = args.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+    let f2 = args.get(2).and_then(|v| v.as_float()).unwrap_or(0.5);
+    let c2 = args.get(3).and_then(|v| v.as_float()).unwrap_or(0.0);
+
+    // NARS abduction: f = f2, c = f1 * c1 * c2 / (f1 * c1 * c2 + horizon)
+    let horizon = 1.0_f64;
+    let w = f1 * c1 * c2;
+    let f = f2;
+    let c = w / (w + horizon);
+
+    let mut row = HashMap::new();
+    row.insert("frequency".to_string(), Value::Float(f));
+    row.insert("confidence".to_string(), Value::Float(c));
+    row.insert("expectation".to_string(), Value::Float(c * (f - 0.5) + 0.5));
+
+    Ok(ProcedureResult {
+        columns: vec!["frequency".to_string(), "confidence".to_string(), "expectation".to_string()],
+        rows: vec![row],
+    })
+}
+
+/// ladybug.induction(f1, c1, f2, c2) → inducted truth value
+/// NARS induction: A, A→B ⊢ generalise (A→B)
+fn proc_induction(args: &[Value]) -> Result<ProcedureResult> {
+    let f1 = args.first().and_then(|v| v.as_float()).unwrap_or(0.5);
+    let c1 = args.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+    let f2 = args.get(2).and_then(|v| v.as_float()).unwrap_or(0.5);
+    let c2 = args.get(3).and_then(|v| v.as_float()).unwrap_or(0.0);
+
+    // NARS induction: f = f1, c = f2 * c1 * c2 / (f2 * c1 * c2 + horizon)
+    let horizon = 1.0_f64;
+    let w = f2 * c1 * c2;
+    let f = f1;
+    let c = w / (w + horizon);
+
+    let mut row = HashMap::new();
+    row.insert("frequency".to_string(), Value::Float(f));
+    row.insert("confidence".to_string(), Value::Float(c));
+    row.insert("expectation".to_string(), Value::Float(c * (f - 0.5) + 0.5));
+
+    Ok(ProcedureResult {
+        columns: vec!["frequency".to_string(), "confidence".to_string(), "expectation".to_string()],
         rows: vec![row],
     })
 }

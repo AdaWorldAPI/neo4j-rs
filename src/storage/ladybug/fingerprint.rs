@@ -98,6 +98,32 @@ impl ContainerDto {
         self.words.iter().all(|&w| w == 0)
     }
 
+    /// Circular word-level permutation (left-rotate by `n` word positions).
+    ///
+    /// This is the VSA "permute" operation — breaks XOR commutativity
+    /// so that position matters: `permute(A,1) ⊕ ROLE ≠ permute(A,3) ⊕ ROLE`.
+    /// Used by SPO trace to make subject/object distinguishable.
+    #[inline]
+    pub fn permute(&self, n: usize) -> ContainerDto {
+        let shift = n % Self::WORDS;
+        let mut result = ContainerDto::zero();
+        for i in 0..Self::WORDS {
+            result.words[(i + shift) % Self::WORDS] = self.words[i];
+        }
+        result
+    }
+
+    /// Inverse permutation (right-rotate by `n` word positions).
+    #[inline]
+    pub fn unpermute(&self, n: usize) -> ContainerDto {
+        let shift = n % Self::WORDS;
+        let mut result = ContainerDto::zero();
+        for i in 0..Self::WORDS {
+            result.words[i] = self.words[(i + shift) % Self::WORDS];
+        }
+        result
+    }
+
     /// Raw bytes view (1024 bytes, cache-aligned).
     pub fn as_bytes(&self) -> &[u8] {
         unsafe {

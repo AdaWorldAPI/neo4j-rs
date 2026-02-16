@@ -6,12 +6,16 @@
 //! - INTEGRATION_PLAN_SCHEMA_CHANGES.md rev 2 (BindSpace as storage)
 //!
 //! Every node gets fingerprinted into an 8192-bit container. Properties are
-//! stored side-by-side for RETURN projections. Relationships are XOR-bound
-//! (src ⊕ verb ⊕ dst). CALL ladybug.* procedures dispatch to NARS, spine,
-//! DN tree, and resonance search.
+//! stored side-by-side for RETURN projections. Relationships carry holographic
+//! SPO traces: `trace = (S ⊕ ROLE_S) ⊕ (P ⊕ ROLE_P) ⊕ (O ⊕ ROLE_O)`.
+//! Given any 2 + trace, recover the 3rd via pure XOR.
+//!
+//! Similarity search uses Belichtungsmesser (7-sample ~14 cycle pre-filter)
+//! rejecting ~90% of candidates before exact Hamming.
 
 pub mod fingerprint;
 pub mod procedures;
+pub mod spo;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +32,7 @@ use crate::index::IndexType;
 use crate::{Error, Result};
 
 use self::fingerprint::{ContainerDto, PropertyFingerprinter, bind_labels};
+use self::spo::SpoTrace;
 
 // ============================================================================
 // Transaction
@@ -78,6 +83,9 @@ struct RelRecord {
     rel_type: String,
     props: PropertyMap,
     fingerprint: ContainerDto,
+    /// Holographic SPO trace: `(S ⊕ ROLE_S) ⊕ (P ⊕ ROLE_P) ⊕ (O ⊕ ROLE_O)`.
+    /// Enables recovery of any missing component via XOR.
+    spo_trace: SpoTrace,
 }
 
 impl LadybugBackend {
@@ -110,22 +118,78 @@ impl LadybugBackend {
         }
     }
 
-    /// Hamming similarity search over all node fingerprints.
+    /// Hamming similarity search using Belichtungsmesser HDR cascade.
+    ///
+    /// L0: 7-point exposure meter (~14 cycles) rejects ~90% of candidates.
+    /// L1: Early-exit exact Hamming prunes distant survivors.
+    /// L2: Full ranking of survivors.
+    ///
+    /// Threshold: maximum Hamming distance to consider (default 2000 ≈ top ~24%).
     pub fn similarity_search(&self, query: &ContainerDto, k: usize) -> Vec<(NodeId, f32)> {
         let fps = self.fingerprints.read().unwrap();
         let slot_map = self.slot_to_id.read().unwrap();
 
-        let mut scored: Vec<(NodeId, f32)> = fps.iter()
-            .enumerate()
-            .filter_map(|(slot, fp)| {
-                let id = slot_map.get(&slot)?;
-                Some((*id, query.similarity(fp)))
-            })
-            .collect();
+        let hits = spo::cascade_search(query, &fps, &slot_map, 2000, k);
+        hits.into_iter().map(|h| (h.node_id, h.similarity)).collect()
+    }
 
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(k);
-        scored
+    /// SPO trace recovery: given a known subject + predicate, recover the
+    /// most likely object by XOR-recovering the fingerprint and searching.
+    ///
+    /// This is the holographic MATCH: `MATCH (s)-[:P]->(?)` becomes
+    /// `missing = trace ⊕ S ⊕ P`, then find closest node to `missing`.
+    pub fn spo_recover_object(
+        &self,
+        src_id: NodeId,
+        rel_type: &str,
+        k: usize,
+    ) -> Vec<(NodeId, f32)> {
+        let fps = self.fingerprints.read().unwrap();
+        let slot_map = self.slot_to_id.read().unwrap();
+        let src_slot = match self.id_to_slot.read().unwrap().get(&src_id).copied() {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        let src_fp = &fps[src_slot];
+        let verb_fp = PropertyFingerprinter::fingerprint_string(rel_type);
+
+        // Collect all SPO traces for edges from src with this rel_type
+        let out = self.out_edges.read().unwrap();
+        let rel_data = self.rel_data.read().unwrap();
+        let edge_ids = match out.get(&src_id) {
+            Some(ids) => ids.clone(),
+            None => return Vec::new(),
+        };
+
+        let mut candidates = Vec::new();
+        for &rid in &edge_ids {
+            if let Some(rec) = rel_data.get(&rid) {
+                if rec.rel_type == rel_type {
+                    // Recover object fingerprint from SPO trace
+                    let recovered = SpoTrace::recover_object(
+                        &rec.spo_trace.trace, src_fp, &verb_fp,
+                    );
+                    candidates.push(recovered);
+                }
+            }
+        }
+        drop(rel_data);
+        drop(out);
+
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        // Search for nodes closest to any recovered fingerprint
+        let mut all_hits = Vec::new();
+        for recovered in &candidates {
+            let hits = spo::cascade_search(recovered, &fps, &slot_map, 100, k);
+            all_hits.extend(hits.into_iter().map(|h| (h.node_id, h.similarity)));
+        }
+        all_hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        all_hits.dedup_by_key(|h| h.0);
+        all_hits.truncate(k);
+        all_hits
     }
 }
 
@@ -274,12 +338,25 @@ impl StorageBackend for LadybugBackend {
         let fps = self.fingerprints.read().unwrap();
         let src_slot = self.id_to_slot.read().unwrap().get(&src).copied();
         let dst_slot = self.id_to_slot.read().unwrap().get(&dst).copied();
+
+        // Legacy flat XOR: src ⊕ verb ⊕ dst (for backward compat)
         let rel_fp = match (src_slot, dst_slot) {
             (Some(s), Some(d)) => fps[s].xor(&verb_fp).xor(&fps[d]),
-            _ => verb_fp,
+            _ => verb_fp.clone(),
         };
+
+        // SPO trace: (S ⊕ ROLE_S) ⊕ (P ⊕ ROLE_P) ⊕ (O ⊕ ROLE_O)
+        // Role vectors make direction distinguishable: A→B ≠ B→A
+        let spo_trace = match (src_slot, dst_slot) {
+            (Some(s), Some(d)) => SpoTrace::bind(&fps[s], &verb_fp, &fps[d]),
+            _ => SpoTrace::bind(&ContainerDto::zero(), &verb_fp, &ContainerDto::zero()),
+        };
+
         drop(fps);
-        self.rel_data.write().unwrap().insert(id, RelRecord { src, dst, rel_type: rel_type.to_string(), props, fingerprint: rel_fp });
+        self.rel_data.write().unwrap().insert(id, RelRecord {
+            src, dst, rel_type: rel_type.to_string(), props,
+            fingerprint: rel_fp, spo_trace,
+        });
         self.out_edges.write().unwrap().entry(src).or_default().push(id);
         self.in_edges.write().unwrap().entry(dst).or_default().push(id);
         Ok(id)

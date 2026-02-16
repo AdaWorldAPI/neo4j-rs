@@ -617,6 +617,137 @@ fingerprints, not original strings).
 
 ---
 
-*Rev 2: Corrected after reading bind_space.rs (2087 lines), adjacency.rs
-(632 lines), spine.rs (204 lines), cam_ops.rs (4096 ops). The architecture
-is far more complete than Rev 1 assumed. BindSpace IS the DTO.*
+---
+
+## 9. SPO/XYZ Holographic Geometry (Rev 3)
+
+> Added after reading `extensions/spo/spo.rs` (1571 lines),
+> `container/traversal.rs` (440 lines), `container/search.rs` (247 lines),
+> `qualia/felt_traversal.rs` (180+ lines), and the blasgraph lineage
+> (ARCHITECTURE.md Section 26).
+
+### The Insight
+
+The DN-Tree IS the sparse adjacency already. Each CogRecord's W16-31
+(64 inline edges) + W96-111 (CSR overflow) is the RedisGraph CSR layout
+transcoded to cognitive verb IDs + Container target hints:
+
+```text
+RedisGraph (CSR integer IDs)
+  → Holograph (DnNodeStore + DnCsr, fingerprint IDs)
+    → BlasGraph (sparse adjacent vectors, BLAS-style ops)
+      → ContainerGraph (pure Container-native, everything 8192 bits)
+```
+
+### SPO Triple Encoding
+
+Every relationship in LadybugBackend now carries a **holographic SPO trace**:
+
+```text
+S = Subject container   (8192 bits) — node fingerprint
+P = Predicate container (8192 bits) — verb fingerprint (e.g., "CAUSES")
+O = Object container    (8192 bits) — node fingerprint
+
+trace = permute(S,1) ⊕ ROLE_S ⊕ permute(P,43) ⊕ ROLE_P ⊕ permute(O,89) ⊕ ROLE_O
+```
+
+**Permutation** (word-level circular shift) breaks XOR commutativity:
+`A→B` and `B→A` produce different traces because `permute(A,1) ≠ permute(A,89)`.
+This is the standard VSA approach — ladybug's SPO Crystal uses orthogonal
+codebooks for the same purpose; we use permutation since we don't maintain
+a codebook in the bridge layer.
+
+### Holographic Recovery
+
+Given any 2 components + trace, recover the 3rd via pure XOR:
+
+```text
+MATCH (s)-[:CAUSES]->(?)     →  missing_O = recover_object(trace, S, P)
+MATCH (?)-[:CAUSES]->(o)     →  missing_S = recover_subject(trace, P, O)
+MATCH (s)-[?]->(o)           →  missing_P = recover_predicate(trace, S, O)
+```
+
+No index lookup needed. ~256 XOR + rotate operations (128 words × 2 ops).
+
+### Belichtungsmesser HDR Cascade
+
+Similarity search now uses the 3-level cascade from `container/search.rs`:
+
+| Level | Operation | Cycles | Purpose |
+|-------|-----------|--------|---------|
+| L0 | Belichtungsmesser (7 samples) | ~14 | Rejects ~90% of candidates |
+| L1 | Exact Hamming with early exit | ~128 | Prunes distant survivors |
+| L2 | Full ranking | ~256 | Final top-k |
+
+This replaces the previous O(n × 8192-bit) linear scan with O(n × 448-bit)
+pre-filter + O(0.1n × 8192-bit) exact pass.
+
+### Semiring Traversal
+
+Five concrete semirings mirror `container/traversal.rs`:
+
+| Semiring | Value | Use Case |
+|----------|-------|----------|
+| BooleanBfs | `bool` | Reachability queries (MATCH path exists) |
+| HammingMinPlus | `u32` | Shortest semantic path |
+| HdrPathBind | `Option<ContainerDto>` | XOR-compose path fingerprints |
+| ResonanceSearch | `u32` | Find paths resonating with query |
+| CascadedHamming | `u32` | Belichtungsmesser-accelerated shortest path |
+
+All operate on `ContainerDto` (neo4j-rs local type) and will bridge to
+ladybug's `DnSemiring` over `Container` when compiled together.
+
+### New Procedures
+
+| Procedure | Args | Operation |
+|-----------|------|-----------|
+| `ladybug.spo.trace(s, p, o)` | 3 strings | Compute holographic trace + verify recovery |
+| `ladybug.spo.recover(k1, k2, trace, role)` | 3 strings + role | Recover missing SPO component |
+| `ladybug.abduction(f1, c1, f2, c2)` | NARS truth values | A→B, B ⊢ A (weak inference) |
+| `ladybug.induction(f1, c1, f2, c2)` | NARS truth values | A, A→B ⊢ generalise |
+
+### Integration Chain
+
+```text
+Cypher: MATCH (a)-[:CAUSES]->(b)
+  → neo4j-rs parses, plans expand()
+    → LadybugBackend dispatches via SPO trace
+      → For known-subject queries: recover_object(trace, S, P)
+      → Belichtungsmesser cascade finds closest node to recovered fingerprint
+        → ~14 cycles per candidate, 90% rejection at L0
+      → For multi-hop: semiring MxV over adjacency (container_mxv)
+        → Each hop reads InlineEdges from CogRecord W16-31
+        → DnSemiring multiply + add per edge
+```
+
+### File Map (Rev 3)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/storage/ladybug/mod.rs` | ~500 | LadybugBackend + StorageBackend impl + SPO recovery |
+| `src/storage/ladybug/fingerprint.rs` | ~360 | ContainerDto + permute/unpermute + PropertyFingerprinter |
+| `src/storage/ladybug/spo.rs` | ~350 | SpoTrace + Belichtungsmesser + cascade + semirings |
+| `src/storage/ladybug/procedures.rs` | ~350 | 14 CALL procedure handlers |
+
+### What's Left
+
+1. **Bridge to real BindSpace** — Replace RwLock<HashMap> internal storage
+   with `BindSpace` instance when `#[cfg(feature = "ladybug")]` is active.
+   The `SpoTrace` already uses the same role vector seeds as ladybug's
+   SPO Crystal (0xDEADBEEF_CAFEBABE, etc.).
+
+2. **Felt traversal dispatch** — Wire `CALL ladybug.felt_traverse(dn)` to
+   ladybug's `FeltPath` with surprise/free-energy reporting.
+
+3. **GrBMatrix facade** — The `GRAPH.QUERY` command interface wrapping
+   `container_mxv()` with XOR semirings. The GrBMatrix rows ARE the
+   CogRecord inline edges viewed as sparse matrix format.
+
+4. **Quorum field procedures** — `CALL ladybug.quorum.evolve()` for
+   5×5×5 lattice dynamics.
+
+---
+
+*Rev 3: Added SPO/XYZ holographic geometry, Belichtungsmesser cascade,
+permutation-based role binding, 5 semiring implementations, and blasgraph
+lineage documentation. All tests pass. Zero changes to ladybug-rs.*
