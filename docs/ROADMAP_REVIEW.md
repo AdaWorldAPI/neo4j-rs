@@ -428,7 +428,7 @@ storage primitive. This has direct implications for the neo4j-rs LadybugBackend:
 | Record size | Variable | Fixed 2,048 bytes | Simpler |
 | Fingerprint | 157w (10,048 bits) | 192w (12,288 bits) | Wider FP, better algebra |
 | Edge storage | Inline words (W16-31) | 512-bit bitvectors (C1-C3) | Bucket-based, not direct |
-| Node identity | PackedDn in W0 | Addr(u16) in C0 w0 | 16-bit, not 64-bit |
+| Node identity | PackedDn in W0 | Addr(u16) local slot + u65-u128 full node ID | Layered: u16 slot, u64 full identity |
 | Tree traversal | No built-in | LCRS pointers in C0 w5 | Free parent/child/sibling |
 | Labels | Bloom in W40-47 | Via structure bytes + label map | Different lookup |
 | Properties | Content container | Lance sidecar (unchanged) | Same |
@@ -436,7 +436,43 @@ storage primitive. This has direct implications for the neo4j-rs LadybugBackend:
 | Graph adjacency | CSR + inline edges | C1 (out) + C2 (in) bitvectors | GraphBLAS-style |
 | Verb filtering | Scan edge types | C3 verb-type mask (1 bit per verb) | O(1) verb check |
 
-### 8.2 What This Means for CAM_CYPHER_REFERENCE.md
+### 8.2 Layered Address Space
+
+The address space is NOT flat. It's stratified by bit range:
+
+```
+Bit Range     Width    Purpose              Examples
+─────────────────────────────────────────────────────────────
+u1-u16        16 bit   Commands / Verbs      CAM ops: 0x200 (MatchNode), 0x220 (CreateNode)
+                                              Verb IDs: 0x100-0x1FF (CAUSES, KNOWS, etc.)
+u33-u64       ~32 bit  Edge identity          Relationship IDs in neo4j-rs
+u65-u128      ~64 bit  Node identity          Full node address (PackedDn / DN path hash)
+```
+
+**Implications for neo4j-rs LadybugBackend**:
+
+1. **`NodeId(u64)` maps to the u65-u128 range** — neo4j-rs's `NodeId` is correct
+   at 64 bits; it maps to the upper half of the address space, not the u16 `Addr`
+   slot. The BiMap bridges `NodeId(u64)` ↔ full node identity in u65-u128.
+
+2. **`RelId(u64)` maps to the u33-u64 range** — relationship IDs live in the
+   32-bit edge address space. This means neo4j-rs's `RelId(u64)` is wider than
+   needed but that's fine (upper bits zero).
+
+3. **Verb/command IDs are u16** — the `rel_type` string → verb ID mapping in the
+   CAM namespace (0x100-0x1FF) stays in the u16 command range. Verbs are NOT in
+   the edge address space — they're in the command space.
+
+4. **The CogRecord 256 `Addr(u16)` is a local slot**, not the full node identity.
+   It's the array index within a BindSpace bucket. The full node identity
+   (u65-u128) includes the bucket prefix + slot + disambiguation.
+
+This layered design means the `StorageBackend` trait's `NodeId(u64)` and
+`RelId(u64)` are correctly sized — they map to the node and edge address
+ranges respectively, and the LadybugBackend translation layer handles the
+bit-range placement.
+
+### 8.3 What This Means for CAM_CYPHER_REFERENCE.md
 
 The CAM reference's §8 ("Container Metadata Word Layout") describes the OLD
 128-word layout (W0-W127). With the CogRecord 256 design:
@@ -451,7 +487,7 @@ The CAM reference's §8 ("Container Metadata Word Layout") describes the OLD
 | `shortestPath(...)` 0x260 | HammingMinPlus semiring | C1/C2 BFS + C8-C31 Hamming |
 | `vector_query()` 0x2C5 | CAKES k-NN | CAKES via CLAM tree over C8-C31 |
 
-### 8.3 CLAM Hardening Impact
+### 8.4 CLAM Hardening Impact
 
 The CLAM_HARDENING.md proposes replacing the ad-hoc scent hierarchy with a
 proper CLAM tree. For neo4j-rs:
