@@ -831,19 +831,63 @@ The fundamental design invariant across the entire ecosystem:
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  ALWAYS: 1 × 8192-bit METADATA container (128 × u64 = 1 KB)    │
-│  THEN:   N × 8192-bit CONTENT containers (polymorphic payload)  │
+│  Everything adheres to 8192-bit metadata. NON-NEGOTIABLE.       │
 │                                                                  │
-│  The metadata container is NON-NEGOTIABLE. Everything adheres    │
-│  to 8192-bit metadata. Content containers are flexible:          │
+│  THEN:   N × 8192-bit CONTENT containers (polymorphic payload)  │
 │                                                                  │
 │  ├── N=1: bitpacked fingerprint (1 × 8192 = 8,192 bits)        │
 │  ├── N=2: CogRecord 256 (meta + content = 2 × 8192 = 2 KB)    │
 │  ├── N=3: 3D bitpacked vector (3 × 8192 = 24,576 bits)         │
 │  │         Each container = one spatial axis/dimension           │
-│  ├── N=k: 1024D Jina embedding packed into k containers         │
+│  ├── N=k: Jina 1024D hydration (hybrid mode, see §13.3)        │
 │  └── N=arbitrary: any data that fits the 8192-bit block format  │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+### 13.2.1 CAM Is the Standard Mode
+
+**Content Addressable Memory (CAM) is the STANDARD operating mode.** In CAM mode:
+
+- If the fingerprint is a **random bitpacked distance vector**, it uses the
+  content container(s) only. The metadata container stays separate — routing,
+  NARS, scent, adjacency live there.
+
+- If the container IS the **CAM itself**, then the **full 256 × u64 = 16,384 bits
+  IS the fingerprint**. Structure IS content. The entire CogRecord is content-
+  addressable. Metadata fields (C0-C7) are part of the addressable key because
+  in CAM mode, you address by content — the structure participates in similarity.
+
+This means the CogRecord 256 design has a **dual nature**:
+```
+CAM MODE (standard):
+  All 256 words = content-addressable fingerprint
+  C0-C7 structure fields participate in Hamming distance
+  The entire record IS the similarity key
+
+BITPACKED DISTANCE MODE:
+  C0-C7 = metadata (not in fingerprint)
+  C8-C31 = fingerprint (192 words = 12,288 bits)
+  Only content containers participate in distance computation
+```
+
+### 13.2.2 Hybrid Mode — Jina Hydration
+
+Unless additional containers are needed for **Jina hydration** (external dense
+embeddings from Jina, CLIP, or similar models), the CAM standard applies.
+When hybrid mode IS needed:
+
+```
+HYBRID MODE (Jina hydration):
+  metadata     (8192 bits) = standard CAM routing + NARS
+  content CAM  (8192 bits) = bitpacked fingerprint (CAM-native)
+  content Jina (N × 8192 bits) = external embedding containers
+  Total: (2 + N) × 8192 bits
+```
+
+Hybrid mode allows **both** CAM-native similarity (Hamming on bitpacked) AND
+dense embedding similarity (cosine on Jina vectors) on the same entity. The
+`vector_query()` method in LadybugBackend would need to specify which space
+to search: CAM (bitpacked) or Jina (dense), or both with fusion scoring.
 
 **The 3D bitpacked vector** = 3 content containers of 8192 bits each. Each
 container represents one axis of a 3-dimensional bitpacked space. This is
@@ -861,13 +905,23 @@ The container count N is a per-entity property, not a global constant.
 
 The various documents describe specific CONFIGURATIONS of the N-container model:
 
-**Configuration: CogRecord 256 (N=1 content, 2 containers total)**:
+**Configuration: CAM Standard (full 256u fingerprint)**:
 ```
-metadata (8192 bits) = C0-C7 structure (32 compartments × 64B each, only 8 used)
+All 256 × u64 = 16,384 bits = content-addressable key
+No metadata/content split — the ENTIRE record is the fingerprint
+Total: 2 × 8192 = 2 KB (2 containers, both addressable)
+```
+- **This is the DEFAULT mode.** CAM is the standard.
+- The CogRecord 256 compartment layout (C0-C31) all participate in CAM lookup
+- Hamming distance computed on all 256 words
+
+**Configuration: CogRecord 256 with metadata split (bitpacked distance mode)**:
+```
+metadata (8192 bits) = C0-C7 structure (8 compartments × 64B)
 content  (8192 bits) = C8-C31 fingerprint (24 compartments × 64B)
 Total: 256 × u64 = 16,384 bits = 2 KB = 2 containers
 ```
-- The COGNITIVE_RECORD_256.md design
+- The COGNITIVE_RECORD_256.md design when used in distance mode
 - 32 compartments (8 structure + 24 fingerprint) map onto 2 × 8192 blocks
 - LCRS tree pointers, 512-bit bitvector adjacency, Q16.16 NARS in metadata
 
@@ -891,35 +945,69 @@ Total: 4 × 8192 = 32,768 bits = 4 KB
 - Each axis is a full 8192-bit bitpacked vector
 - Hamming distance computed per-axis or combined
 
-**Configuration: Jina 1024D (N varies)**:
+**Configuration: Hybrid Jina (meta + bitpacked + 1024D Jina)**:
 ```
-metadata (8192 bits) = standard routing + NARS
-content  (N × 8192 bits) = 1024 float32 dimensions packed into containers
-1024 × 32 bits = 32,768 bits = 4 containers
-Total: 5 × 8192 = 40,960 bits = 5 KB
+metadata   (1 × 8192 bits) = routing, NARS, scent, adjacency, DN tree
+bitpacked  (1 × 8192 bits) = CAM-native fingerprint (Hamming distance)
+Jina 1024D (3 × 8192 bits) = dense embedding (24,576 bits for 1024 dims)
+Total: 5 × 8192 = 40,960 bits = 5 KB = 5 containers
+```
+- Hybrid mode: both CAM-native (Hamming on bitpacked) AND dense (cosine on Jina)
+- 1024D Jina embedding fits exactly in 3 containers (3 × 8192 = 24,576 bits)
+- Allows parallel similarity queries on both representation spaces
+
+### 13.4 Container Stacking = DN Tree Node
+
+Container stacking (meta + N content) isn't just storage — **the stack IS the
+full node representation in the DN tree**. A DN tree node at any level is its
+complete container stack.
+
+**Leaf insert hydration**: When inserting a leaf node, you don't provide all
+containers upfront. The tree hydrates the new leaf from its parent's adjacent
+containers:
+
+```
+Parent node: [meta | bitpacked | jina_0 | jina_1 | jina_2]  (5 containers)
+                                    │
+                              leaf insert
+                                    │
+                                    ▼
+New leaf:    [meta']  ← hydrated from parent's metadata
+             meta' inherits: DN path (parent prefix + new leaf tiers)
+                             adjacency (linked to parent)
+                             scent (derived from parent's scent)
+             content ← hydrated from parent adjacent via XOR/unbind
 ```
 
-### 13.4 Implications for the Review
+This is the **SpineCache pattern** from ARCHITECTURE.md: the XOR-fold of children
+equals the parent's structural prediction. A new leaf's fingerprint is derived
+by unbinding from the parent's spine, not computed from scratch. The tree
+progressively refines as more data arrives.
+
+**Implication for LadybugBackend**: `create_node()` can be lightweight — provide
+labels + properties, and the backend computes the initial fingerprint AND
+determines tree placement by finding the nearest parent via Hamming distance.
+The full container stack is built incrementally through hydration, not all at once.
+
+### 13.5 Implications for the Review
 
 This corrects several assumptions in the earlier sections:
 
-1. **Section 8 (CogRecord 256)**: The CogRecord 256 is a specific N=1 configuration,
-   not "the" container design. The 32-compartment layout maps onto 2 × 8192 blocks.
+1. **Section 8 (CogRecord 256)**: In CAM mode (standard), the full 256u IS the
+   fingerprint. The C0-C7 / C8-C31 split only applies in bitpacked distance mode.
 
-2. **Section 14 (FP width reconciliation)**: The fingerprint width is NOT fixed at
-   160w or 192w — it depends on how many content containers a given entity has.
-   The 160w Arrow representation is the SINGLE-CONTAINER fingerprint column.
-   Multi-container entities (3D vectors, Jina embeddings) have multiple fingerprint
-   columns or a variable-length representation.
+2. **Section 14 (FP width reconciliation)**: In CAM mode, fingerprint width = 256
+   words = full CogRecord. In distance mode, fingerprint = C8-C31 = 192 words.
+   Arrow FP_WORDS = 160 applies to the distance-mode column representation.
 
-3. **LadybugBackend design**: `get_node()` always returns the metadata container.
-   `vector_query()` must specify WHICH content containers to search (axis 0? all 3?).
-   The `BackendCapabilities` should advertise the container configurations supported.
+3. **LadybugBackend design**: `vector_query()` must distinguish CAM mode (full
+   256u Hamming) from distance mode (C8-C31 only) from hybrid Jina (dense cosine).
+   The `BackendCapabilities` should advertise which modes are supported.
 
-4. **Arrow schema**: Schema A works for N=1 (single `FixedSizeBinary(1280)` fingerprint
-   column). For N>1, either use multiple fingerprint columns (`fp_axis_0`, `fp_axis_1`,
-   `fp_axis_2`) or a `FixedSizeList` of containers. Schema B (hot/cold split) becomes
-   more attractive for multi-container entities since the hot routing batch stays narrow.
+4. **Arrow schema**: Schema A works for distance mode (single fingerprint column).
+   CAM mode could use a single `FixedSizeBinary(2048)` column for the full record.
+   Hybrid Jina needs additional columns. Schema B (hot/cold) becomes more attractive
+   for hybrid entities.
 
 ### 13.3 BitpackedCSR — The Graph Topology Primitive
 
