@@ -1,477 +1,622 @@
-# Integration Plan — Schema Changes in ladybug-rs for neo4j-rs Bridge
+# Integration Plan — neo4j-rs as Cypher Front-End to BindSpace
 
-> **Date**: 2026-02-16
-> **Context**: The DN tree, containers, and CAM are already solidified in
-> `ladybug-contract`. This plan captures what needs to change before the
-> architecture knowledge dilutes.
+> **Date**: 2026-02-16 (rev 2 — corrected after reading BindSpace source)
 >
-> **Principle**: `ladybug-contract` is the source of truth. neo4j-rs depends
-> on it, not the other way around.
+> **Correction**: Rev 1 proposed duplicating ladybug types in neo4j-rs.
+> Wrong. BindSpace IS the universal DTO. LadybugBackend wraps a BindSpace
+> instance directly. No translation layer needed — just mapping.
+>
+> **Vision**: neo4j-rs becomes the Cypher front-end to the entire ladybug
+> cognitive architecture. Standard Cypher gives you graph CRUD. CALL
+> procedures give you NARS inference, causal reasoning, XOR-fold spine
+> queries, consciousness rung classification, and agent orchestration.
 
 ---
 
-## 0. What's Already Solid (DO NOT CHANGE)
+## 0. The Correction
 
-These types are complete, tested, and correct. The integration plan builds
-ON them, never modifies them:
+Rev 1 got this wrong:
+- Proposed `ladybug-contract` as dependency → **Wrong.** Need `ladybug` (main crate)
+  because `BindSpace`, `PackedDn`, `SpineCache` live there, not in the contract crate.
+- Proposed `NodeTranslator`, `VerbTable`, `PropertyFingerprinter` as new types →
+  **Wrong.** BindSpace already has `verb("CAUSES")`, `label_fingerprint()`,
+  `dn_path_to_addr()`, `write_dn_path()`. No need to duplicate.
+- Proposed `BTreeMap<u64, CogRecord>` as storage → **Wrong.** BindSpace IS the
+  storage. 65,536 addressable slots at 3-5 cycles per lookup via `Addr(prefix:slot)`.
+- Proposed separate edge storage → **Wrong.** BindSpace has `link()`, `edges_out()`,
+  `edges_in()`, `traverse()`, `traverse_n_hops()`, plus `BitpackedCsr` for zero-copy.
 
-| Type | Crate | File | Status |
-|------|-------|------|--------|
-| `Container` (128 × u64, 8192 bits) | ladybug-contract | `container.rs` | Frozen |
-| `CogRecord` (meta + content, 2 KB) | ladybug-contract | `record.rs` | Frozen |
-| `ContainerGeometry` (Cam/Xyz/Bridge/Extended/Chunked/Tree) | ladybug-contract | `geometry.rs` | Frozen |
-| `MetaView` / `MetaViewMut` (50+ zero-copy accessors) | ladybug-contract | `meta.rs` | Frozen |
-| `TruthValue` (f32 freq/conf, full NAL truth functions) | ladybug-contract | `nars.rs` | Frozen |
-| `CogPacket` (binary wire: 64B header + 1-2 containers) | ladybug-contract | `wire.rs` | Frozen |
-| `CognitiveAddress` (64-bit domain/subtype) | ladybug-contract | `address.rs` | Frozen |
-| `OpCategory` / `OpSignature` (CAM codebook) | ladybug-contract | `codebook.rs` | Frozen |
-| `PackedDn` (7-level hierarchy, u64) | ladybug (main) | `container/adjacency.rs` | Frozen |
-| `SpineCache` (XOR-fold, lock-free) | ladybug (main) | `container/spine.rs` | Frozen |
-| `SchemaSidecar` (32-word, 16K compat) | ladybug (main) | `width_16k/schema.rs` | Frozen |
-| `BindSpace` / `Addr` (8+8 addressing) | ladybug (main) | `storage/bind_space.rs` | Frozen |
+What BindSpace actually provides (already implemented, 2087 lines):
 
-**The metadata layout (W0-W127 in meta.rs) is the master schema.** Everything
-else derives from it. The 8192-bit metadata container already has:
-- W0: PackedDn identity
-- W1: node_kind | container_count | geometry | flags | schema_version
-- W4-7: NARS (freq, conf, pos_evidence, neg_evidence)
-- W16-31: Inline edges (64 packed, 4 per word)
-- W96-111: DN-sparse adjacency (compact inline CSR)
+```
+BindSpace.write(fingerprint)           → Addr        // CREATE
+BindSpace.read(addr)                   → &BindNode   // MATCH
+BindSpace.link(from, verb, to)         → usize       // CREATE relationship
+BindSpace.traverse(from, verb)         → Vec<Addr>   // MATCH ()-[r:VERB]->()
+BindSpace.traverse_n_hops(a, v, n)     → Vec<(hop, Addr)>  // variable-length path
+BindSpace.edges_out(addr)              → Iterator<&BindEdge>
+BindSpace.edges_in(addr)               → Iterator<&BindEdge>
+BindSpace.verb("CAUSES")              → Option<Addr>  // Surface 0x07 lookup
+BindSpace.meta(addr)                   → MetaView     // NARS, edges, rung, qualia
+BindSpace.content(addr)                → Container    // search fingerprint
+BindSpace.nars_revise(addr, f, c)      → ()          // in-place NARS revision
+BindSpace.write_dn_path(path, fp, rung) → Addr       // hierarchical create
+BindSpace.resolve("bindspace://path")  → Option<Addr>
+BindSpace.parent(addr)                 → Option<Addr> // O(1) tree navigation
+BindSpace.ancestors(addr)              → Iterator<Addr>
+BindSpace.siblings(addr)               → Iterator<Addr>
+BindSpace.children_raw(addr)           → &[u16]       // zero-copy CSR
+BindSpace.rebuild_csr()                → ()           // build BitpackedCsr
+BindSpace.dirty_addrs()                → Iterator<Addr>
+BindSpace.hash_all()                   → [u64; 256]   // XOR-fold integrity
+```
+
+**BindSpace already has a QueryAdapter trait:**
+```rust
+pub trait QueryAdapter {
+    fn execute(&self, space: &mut BindSpace, query: &str) -> QueryResult;
+}
+```
+
+neo4j-rs's Cypher execution engine becomes a `QueryAdapter` implementation.
 
 ---
 
-## 1. Bridge DTOs — What neo4j-rs Needs
-
-neo4j-rs has its own type system (NodeId, RelationshipId, Property, Label,
-Value). The bridge must translate between these and ladybug-contract types
-without either side knowing about the other.
-
-### 1.1 Translation Layer Types (NEW — in neo4j-rs)
-
-These live in neo4j-rs under a new `ladybug` feature gate:
+## 1. What LadybugBackend Actually Is
 
 ```rust
-// neo4j-rs/src/storage/ladybug.rs (new file)
+// neo4j-rs/src/storage/ladybug/mod.rs
 
-use ladybug_contract::{Container, CogRecord, ContainerGeometry, MetaView, MetaViewMut};
-
-/// Maps a neo4j-rs NodeId(u64) to a ladybug PackedDn address.
-/// For string IDs (aiwar pattern), uses deterministic hash.
-pub struct NodeTranslator {
-    /// Strategy for ID mapping
-    strategy: IdStrategy,
-    /// Label → verb_mask bit position (144 core + hash fallback)
-    verb_table: VerbTable,
-}
-
-pub enum IdStrategy {
-    /// NodeId(u64) maps directly to PackedDn via level assignment
-    Direct,
-    /// String ID → u64 via SipHash-2-4 (deterministic, collision-resistant)
-    HashFromString,
-}
-
-/// Translates Neo4j relationship types + properties to ladybug verb slots.
-pub struct VerbTable {
-    /// First 144 slots: well-known verbs (CAUSES, BECOMES, PART_OF, etc.)
-    core: [Option<&'static str>; 144],
-    /// Overflow: SipHash of verb string → slot 144-255
-    overflow: HashMap<String, u8>,
-}
-
-impl VerbTable {
-    /// Extract verb from a relationship.
-    /// Configurable: from rel_type, from property, or both.
-    pub fn extract_verb(&self, rel_type: &str, properties: &Properties) -> u8 {
-        // 1. Check if rel_type is a known verb
-        // 2. If CONNECTED_TO, check r.label property (aiwar pattern)
-        // 3. Fall back to hash
-    }
-}
-```
-
-### 1.2 Property → Container Fingerprinting (NEW — in neo4j-rs)
-
-```rust
-/// Converts Neo4j node properties to a content Container.
-///
-/// Property keys are sorted alphabetically before fingerprinting
-/// (addresses W-3 gotcha from wiring plan: HashMap iteration order).
-pub struct PropertyFingerprinter {
-    mode: FingerprintMode,
-}
-
-pub enum FingerprintMode {
-    /// Full record IS fingerprint (CAM standard)
-    Cam,
-    /// Content container only (bitpacked distance mode)
-    Bitpacked,
-    /// CAM + external Jina vector (hybrid)
-    Hybrid { jina_endpoint: String },
-}
-
-impl PropertyFingerprinter {
-    /// Convert sorted properties to a Container.
-    /// Each key-value pair is hashed and XOR-bound into the container.
-    pub fn fingerprint(&self, properties: &[(String, Value)]) -> Container {
-        let mut fp = Container::zero();
-        let mut sorted: Vec<_> = properties.to_vec();
-        sorted.sort_by(|a, b| a.0.cmp(&b.0)); // deterministic order
-
-        for (key, value) in &sorted {
-            let key_fp = Container::random(siphash(key));
-            let val_fp = Container::random(siphash(&value.to_string()));
-            let pair_fp = key_fp.xor(&val_fp);
-            fp = fp.xor(&pair_fp);
-        }
-        fp
-    }
-}
-```
-
-### 1.3 Label → Metadata Binding (NEW — in neo4j-rs)
-
-```rust
-/// Binds Neo4j labels into the metadata container.
-/// Multi-label nodes (aiwar: Stakeholder:TechCompany:AIDeveloper)
-/// XOR-bind ALL labels into a single label fingerprint.
-pub fn bind_labels(labels: &[String]) -> u64 {
-    let mut hash = 0u64;
-    for label in labels {
-        hash ^= siphash(label.as_bytes());
-    }
-    hash
-}
-```
-
----
-
-## 2. Schema Changes in ladybug-contract (MINIMAL)
-
-The existing schema is complete. These are the ONLY additions needed:
-
-### 2.1 Add `StorageBackend` Extension Points
-
-The wiring plan identified 5 gaps. These require NEW trait methods in
-whatever crate defines the backend trait. They do NOT change ladybug-contract
-types — they add methods to the trait that LadybugBackend implements.
-
-In neo4j-rs (`src/storage/mod.rs`), add to `StorageBackend`:
-
-```rust
-/// Gap 1: Full-text / vector similarity search.
-fn vector_query(
-    &self,
-    query: Container,        // ladybug-contract type
-    k: usize,
-    threshold: Option<f32>,
-) -> Result<Vec<(NodeId, f32)>> {
-    Ok(vec![]) // default: empty (MemoryBackend returns nothing)
-}
-
-/// Gap 2: Call a registered procedure.
-fn call_procedure(
-    &self,
-    name: &str,
-    args: Vec<Value>,
-) -> Result<Vec<Record>> {
-    Err(Error::UnsupportedProcedure(name.to_string()))
-}
-
-/// Gap 3: Retrieve backend-specific metadata slot.
-fn get_metadata_slot(
-    &self,
-    node_id: NodeId,
-    slot: &str,
-) -> Result<Option<Value>> {
-    Ok(None)
-}
-
-/// Gap 4: Batch node creation (performance path).
-fn create_nodes_batch(
-    &self,
-    nodes: Vec<(Vec<String>, HashMap<String, Value>)>,
-) -> Result<Vec<NodeId>> {
-    // Default: delegate to create_node() one at a time
-    nodes.into_iter()
-        .map(|(labels, props)| self.create_node(labels, props))
-        .collect()
-}
-
-/// Gap 5: Report backend capabilities.
-fn capabilities(&self) -> BackendCapabilities {
-    BackendCapabilities::default() // MemoryBackend: basic only
-}
-```
-
-```rust
-/// What a backend can do beyond basic CRUD.
-#[derive(Default)]
-pub struct BackendCapabilities {
-    pub vector_search: bool,
-    pub procedures: Vec<String>,
-    pub fingerprint_mode: Option<String>, // "cam", "bitpacked", "hybrid"
-    pub batch_create: bool,
-    pub tiered_storage: bool,
-}
-```
-
-### 2.2 No Changes to Container/CogRecord/MetaView
-
-The metadata layout (W0-W127) already has everything needed:
-- **W0 (dn_addr)**: Node identity → maps to Neo4j NodeId
-- **W3 (label_hash)**: Label binding → maps to Neo4j labels (XOR-bound)
-- **W4-7 (NARS)**: Truth values → no Neo4j equivalent (cognitive extension)
-- **W16-31 (edges)**: Inline edges → maps to Neo4j relationships
-- **W96-111 (adjacency)**: CSR → maps to Neo4j graph topology
-
-No new words, no new fields, no layout changes. The existing 128-word
-metadata schema already covers the Neo4j property graph model.
-
-### 2.3 ContainerGeometry — Already Covers All Cases
-
-| Neo4j Pattern | Geometry | Containers | Notes |
-|---------------|----------|:----------:|-------|
-| Standard node | `Cam` (default) | 1 meta + 1 content = 2 KB | CAM: full record IS fingerprint |
-| Node + Jina embedding | `Bridge` | 1 meta + 1 content + external float vector | Hybrid mode |
-| 3D spatial node | `Xyz` | 1 meta + 3 content = 4 KB | One container per axis |
-| Document node (chunked) | `Chunked` | 1 meta + N content | Summary + chunks |
-| Subtree snapshot | `Tree` | 1 meta + N content | BFS heap layout |
-
-The existing 6 geometries cover every case from the roadmap review.
-No new geometry variants needed.
-
----
-
-## 3. Integration Sequence
-
-### Phase A: Dependency Wiring (1 day)
-
-```toml
-# neo4j-rs/Cargo.toml
-[features]
-ladybug = ["ladybug-contract"]
-
-[dependencies]
-ladybug-contract = { git = "https://github.com/AdaWorldAPI/ladybug-rs", optional = true }
-```
-
-- Add `ladybug-contract` as optional dependency
-- Create `src/storage/ladybug.rs` (feature-gated)
-- Import `Container`, `CogRecord`, `ContainerGeometry`, `MetaView`
-
-### Phase B: Translation Layer (3 days)
-
-1. **NodeTranslator**: NodeId(u64) ↔ PackedDn mapping
-   - Direct mode: NodeId = PackedDn.0 (u64 → u64)
-   - Hash mode: String ID → SipHash → u64 (aiwar pattern)
-
-2. **VerbTable**: RelType + properties → verb slot (u8)
-   - 144 core verbs (from CAM reference 0x200-0x2FF)
-   - Hash fallback for custom verbs
-   - Configurable extraction: rel_type, property, or both
-
-3. **PropertyFingerprinter**: Sorted properties → Container
-   - Sort keys alphabetically (deterministic)
-   - XOR-bind each key-value pair
-   - Handle `nan` values (skip, zero, or explicit marker)
-
-4. **LabelBinder**: Multi-label → label_hash (u64)
-   - XOR of all label hashes
-   - Stored in MetaView W3
-
-### Phase C: LadybugBackend Scaffold (3 days)
-
-```rust
-// neo4j-rs/src/storage/ladybug.rs
+use ladybug::storage::bind_space::{BindSpace, Addr, BindNode, FINGERPRINT_WORDS};
+use ladybug::container::{Container, MetaView, MetaViewMut};
+use ladybug::container::adjacency::PackedDn;
 
 pub struct LadybugBackend {
-    /// Node storage: PackedDn → CogRecord
-    records: BTreeMap<u64, CogRecord>,
-    /// Translation layer
-    translator: NodeTranslator,
-    fingerprinter: PropertyFingerprinter,
-    verb_table: VerbTable,
-    /// Spine cache for XOR-fold navigation
-    spine: SpineCache,
+    /// THE storage. Not a wrapper, not a cache — this IS where data lives.
+    space: BindSpace,
+
+    /// NodeId(u64) → Addr mapping (neo4j-rs NodeIds are sequential,
+    /// BindSpace Addrs are prefix:slot — need a bridge).
+    id_to_addr: Vec<Option<Addr>>,        // indexed by NodeId.0
+    addr_to_id: HashMap<Addr, NodeId>,
+
+    /// RelId(u64) → edge index in BindSpace.edges
+    rel_to_edge: Vec<Option<usize>>,
+    edge_to_rel: HashMap<usize, RelId>,
+
+    /// Property storage (BindNode has fingerprint + label + payload,
+    /// but Neo4j nodes need full property maps for RETURN projections).
+    node_props: HashMap<NodeId, PropertyMap>,
+    node_labels: HashMap<NodeId, Vec<String>>,
+    rel_props: HashMap<RelId, PropertyMap>,
+    rel_types: HashMap<RelId, String>,
+    rel_endpoints: HashMap<RelId, (NodeId, NodeId)>,
+
+    /// Counters
+    next_node_id: AtomicU64,
+    next_rel_id: AtomicU64,
+    next_tx_id: AtomicU64,
+
+    /// Label index (same as MemoryBackend — needed for nodes_by_label)
+    label_index: HashMap<String, Vec<NodeId>>,
+}
+```
+
+### Why property storage lives outside BindSpace
+
+BindSpace stores 256-word fingerprints — the XOR-bound content-addressable
+representation. But Neo4j `RETURN n.name` needs the original string "Ada",
+not bits. Two options:
+
+1. **Payload field**: `BindNode.payload: Option<Vec<u8>>` exists but is
+   unstructured. Could store serialized PropertyMap here.
+2. **Side HashMap**: Store PropertyMap alongside. Simpler, proven (MemoryBackend
+   does this), zero risk of corrupting the fingerprint space.
+
+We use option 2 for correctness. The fingerprint in BindSpace IS the CAM
+representation — it's used for similarity search, spine folding, NARS evidence.
+The PropertyMap is the human-readable projection for RETURN clauses.
+
+---
+
+## 2. StorageBackend Implementation — Method by Method
+
+### 2.1 Node CRUD
+
+```rust
+async fn create_node(&self, tx: &mut Tx, labels: &[&str], props: PropertyMap) -> Result<NodeId> {
+    let id = NodeId(self.next_node_id.fetch_add(1, Ordering::Relaxed));
+
+    // 1. Fingerprint properties into 256-word vector
+    let fp = fingerprint_properties(&props);
+
+    // 2. Write to BindSpace (allocates in node zone 0x80-0xFF)
+    let label_str = labels.join(":");
+    let addr = self.space.write_labeled(fp, &label_str);
+
+    // 3. Set NARS initial truth in metadata
+    //    New node: freq=0.5, conf=0.01 (uncertain, no evidence yet)
+    self.space.nars_revise(addr, 0.5, 0.01);
+
+    // 4. Register bidirectional ID ↔ Addr mapping
+    self.id_to_addr[id.0 as usize] = Some(addr);
+    self.addr_to_id.insert(addr, id);
+
+    // 5. Store properties and labels (for RETURN projections)
+    self.node_props.insert(id, props);
+    self.node_labels.insert(id, labels.iter().map(|l| l.to_string()).collect());
+
+    // 6. Update label index
+    for label in labels {
+        self.label_index.entry(label.to_string()).or_default().push(id);
+    }
+
+    Ok(id)
 }
 
-impl StorageBackend for LadybugBackend {
-    // -- CRUD: translate Neo4j ops to CogRecord ops --
-    fn create_node(&mut self, labels: Vec<String>, props: HashMap<String, Value>) -> Result<NodeId> {
-        let record = CogRecord::new(ContainerGeometry::Cam);
-        // 1. Set label_hash in meta via MetaViewMut
-        // 2. Fingerprint properties into content container
-        // 3. Assign PackedDn address
-        // 4. Insert into records + update spine
+async fn get_node(&self, tx: &Tx, id: NodeId) -> Result<Option<Node>> {
+    let addr = self.id_to_addr[id.0 as usize].ok_or(NotFound)?;
+
+    // Read BindNode (O(1) array lookup, 3-5 cycles)
+    let _bind_node = self.space.read(addr).ok_or(NotFound)?;
+
+    // Reconstruct Neo4j Node from stored properties
+    Ok(Some(Node {
+        id,
+        element_id: None,
+        labels: self.node_labels.get(&id).cloned().unwrap_or_default(),
+        properties: self.node_props.get(&id).cloned().unwrap_or_default(),
+    }))
+}
+```
+
+### 2.2 Relationship CRUD
+
+```rust
+async fn create_relationship(
+    &self, tx: &mut Tx, src: NodeId, dst: NodeId,
+    rel_type: &str, props: PropertyMap,
+) -> Result<RelId> {
+    let id = RelId(self.next_rel_id.fetch_add(1, Ordering::Relaxed));
+
+    let src_addr = self.id_to_addr[src.0 as usize].ok_or(NotFound)?;
+    let dst_addr = self.id_to_addr[dst.0 as usize].ok_or(NotFound)?;
+
+    // 1. Resolve verb from Surface 0x07
+    //    CAUSES → Addr(0x07, 0x00), BECOMES → Addr(0x07, 0x01), etc.
+    //    For unknown verbs: register dynamically in the verb surface.
+    let verb_addr = self.resolve_verb(rel_type);
+
+    // 2. Link in BindSpace (creates BindEdge with XOR-bound fingerprint:
+    //    edge.fp = src.fp ⊕ verb.fp ⊕ dst.fp)
+    let edge_idx = self.space.link(src_addr, verb_addr, dst_addr);
+
+    // 3. Register mapping
+    self.rel_to_edge[id.0 as usize] = Some(edge_idx);
+    self.edge_to_rel.insert(edge_idx, id);
+
+    // 4. Store properties, type, endpoints
+    self.rel_props.insert(id, props);
+    self.rel_types.insert(id, rel_type.to_string());
+    self.rel_endpoints.insert(id, (src, dst));
+
+    // 5. NARS: this relationship is evidence.
+    //    Revise source node's truth value toward higher confidence.
+    self.space.nars_revise(src_addr, 0.7, 0.3);
+
+    Ok(id)
+}
+
+fn resolve_verb(&mut self, rel_type: &str) -> Addr {
+    // 1. Try exact match in Surface 0x07 (CAUSES, BECOMES, KNOWS, etc.)
+    if let Some(addr) = self.space.verb(rel_type) {
+        return addr;
     }
 
-    fn create_relationship(&mut self, from: NodeId, to: NodeId, rel_type: String, props: HashMap<String, Value>) -> Result<RelationshipId> {
-        // 1. Extract verb from rel_type + props (VerbTable)
-        // 2. Set inline edge in source node's meta (W16-31)
-        // 3. Update adjacency CSR (W96-111)
+    // 2. Try normalized (lowercase "invests in" → "INVESTS_IN")
+    let normalized = rel_type.to_uppercase().replace(' ', "_").replace('-', "_");
+    if let Some(addr) = self.space.verb(&normalized) {
+        return addr;
     }
 
-    // -- Search: fingerprint-accelerated --
-    fn vector_query(&self, query: Container, k: usize, threshold: Option<f32>) -> Result<Vec<(NodeId, f32)>> {
-        // HdrCascadeExec: L0 scent → L1 popcount → L2 sketch → L3 Hamming → L4 Mexican hat
-    }
+    // 3. Register new verb in Surface 0x07 (dynamic extension)
+    let fp = label_fingerprint(rel_type);
+    let addr = self.space.surface_op_or_register(PREFIX_VERBS, rel_type, fp);
+    addr
+}
+```
 
-    // -- Procedures: 10 registered ladybug.* --
-    fn call_procedure(&self, name: &str, args: Vec<Value>) -> Result<Vec<Record>> {
-        match name {
-            "ladybug.search" => { /* resonance search */ }
-            "ladybug.bind" => { /* XOR bind two fingerprints */ }
-            "ladybug.unbind" => { /* XOR unbind */ }
-            "ladybug.similarity" => { /* Hamming similarity */ }
-            "ladybug.truth" => { /* NARS truth value */ }
-            "ladybug.causality" => { /* NARS causal inference */ }
-            "ladybug.crystallize" => { /* freeze belief */ }
-            "ladybug.explore" => { /* counterfactual world */ }
-            "ladybug.spine" => { /* XOR-fold query */ }
-            "ladybug.rung" => { /* Pearl's rung classification */ }
-            _ => Err(Error::UnsupportedProcedure(name.into()))
+### 2.3 Traversal
+
+```rust
+async fn get_relationships(
+    &self, tx: &Tx, node: NodeId, dir: Direction, rel_type: Option<&str>,
+) -> Result<Vec<Relationship>> {
+    let addr = self.id_to_addr[node.0 as usize].ok_or(NotFound)?;
+
+    let edges: Vec<&BindEdge> = match dir {
+        Direction::Outgoing => self.space.edges_out(addr).collect(),
+        Direction::Incoming => self.space.edges_in(addr).collect(),
+        Direction::Both => {
+            let mut v: Vec<_> = self.space.edges_out(addr).collect();
+            v.extend(self.space.edges_in(addr));
+            v
         }
+    };
+
+    // Filter by type and reconstruct Neo4j Relationship objects
+    let mut results = Vec::new();
+    for edge in edges {
+        let edge_idx = /* look up index */;
+        if let Some(&rel_id) = self.edge_to_rel.get(&edge_idx) {
+            if let Some(rt) = rel_type {
+                if self.rel_types.get(&rel_id).map(|s| s.as_str()) != Some(rt) {
+                    continue;
+                }
+            }
+            results.push(self.reconstruct_relationship(rel_id));
+        }
+    }
+    Ok(results)
+}
+
+async fn expand(
+    &self, tx: &Tx, node: NodeId, dir: Direction,
+    rel_types: &[&str], depth: ExpandDepth,
+) -> Result<Vec<Path>> {
+    let addr = self.id_to_addr[node.0 as usize].ok_or(NotFound)?;
+    let max_hops = match depth {
+        ExpandDepth::Exact(d) => d,
+        ExpandDepth::Range { max, .. } => max,
+        ExpandDepth::Unbounded => 100,
+    };
+
+    // Use BindSpace.traverse_n_hops for BFS expansion
+    // This uses the CSR index — zero-copy, no allocation per hop
+    if rel_types.len() == 1 {
+        if let Some(verb) = self.space.verb(rel_types[0]) {
+            let hops = self.space.traverse_n_hops(addr, verb, max_hops);
+            return self.hops_to_paths(node, &hops);
+        }
+    }
+
+    // Multi-type: fall back to per-hop filtering (still uses edges_out)
+    self.expand_bfs(addr, node, dir, rel_types, depth).await
+}
+```
+
+### 2.4 CALL Procedures — The Extension Point
+
+This is where neo4j-rs goes far beyond standard Cypher:
+
+```rust
+async fn call_procedure(&self, name: &str, args: &[Value]) -> Result<ProcedureResult> {
+    match name {
+        // === SEARCH ===
+        "ladybug.search" => {
+            // Resonance search: fingerprint a query string, find nearest
+            // nodes by Hamming distance over the content container.
+            // Uses HDR cascade: L0 scent → L1 popcount → L2 sketch → L3 Hamming
+            let query = args[0].as_str()?;
+            let k = args.get(1).and_then(|v| v.as_int()).unwrap_or(10);
+            self.resonance_search(query, k)
+        }
+
+        // === VSA OPERATIONS ===
+        "ladybug.bind" => {
+            // XOR-bind two fingerprints. Returns the bound result.
+            // CALL ladybug.bind("concept_A", "concept_B") YIELD fingerprint
+        }
+        "ladybug.unbind" => {
+            // Same as bind (XOR is self-inverse).
+            // Given edge ⊕ known ⊕ verb → recovers unknown.
+        }
+        "ladybug.similarity" => {
+            // Hamming similarity between two nodes or strings.
+            // CALL ladybug.similarity("Ada", "OpenAI") YIELD score
+        }
+
+        // === NARS INFERENCE ===
+        "ladybug.truth" => {
+            // Read NARS truth value <freq, conf> from a node's metadata.
+            // CALL ladybug.truth(nodeId) YIELD frequency, confidence, expectation
+            let addr = self.node_addr(args[0].as_int()?)?;
+            let (f, c) = self.space.read(addr).unwrap().nars();
+            // Return as procedure result
+        }
+        "ladybug.revise" => {
+            // NARS truth revision: accumulate evidence on a node.
+            // CALL ladybug.revise(nodeId, 0.8, 0.6) YIELD frequency, confidence
+            let addr = self.node_addr(args[0].as_int()?)?;
+            self.space.nars_revise(addr, args[1].as_float()?, args[2].as_float()?);
+        }
+        "ladybug.deduction" => {
+            // NARS deduction: A→B, B→C ⊢ A→C with truth propagation.
+            // CALL ladybug.deduction(nodeA, nodeB, nodeC) YIELD frequency, confidence
+        }
+        "ladybug.abduction" => {
+            // NARS abduction: A→B, C→B ⊢ C→A (inference to best explanation).
+        }
+
+        // === CAUSAL REASONING (Pearl's Ladder) ===
+        "ladybug.rung" => {
+            // Classify a node's causal rung: SEE(0), DO(1), IMAGINE(2).
+            // CALL ladybug.rung(nodeId) YIELD rung, label
+            let addr = self.node_addr(args[0].as_int()?)?;
+            let rung = self.space.rung(addr);
+        }
+        "ladybug.counterfactual" => {
+            // Pearl's rung 3: "What if X had been different?"
+            // Creates a counterfactual world by cloning subgraph,
+            // applying intervention, and propagating consequences.
+        }
+
+        // === SPINE / XOR-FOLD ===
+        "ladybug.spine" => {
+            // XOR-fold all nodes with a given label into a single
+            // 256-word digest. Useful for cluster fingerprinting.
+            // CALL ladybug.spine("Person") YIELD spine, count, popcount
+        }
+
+        // === DN TREE ===
+        "ladybug.dn.navigate" => {
+            // Navigate the DN tree by path.
+            // CALL ladybug.dn.navigate("Ada:A:soul:identity") YIELD addr, depth, rung
+            let path = args[0].as_str()?;
+            let addr = self.space.write_dn_path(path, ...);
+        }
+        "ladybug.dn.ancestors" => {
+            // Walk up the DN tree from a node.
+            // Returns all ancestors as rows.
+        }
+        "ladybug.dn.children" => {
+            // List children of a DN node.
+        }
+
+        // === CRYSTALLIZATION ===
+        "ladybug.crystallize" => {
+            // Mark a belief as frozen (high confidence, won't decay).
+            // Sets confidence to 0.99 and TTL to 0 (permanent).
+        }
+
+        // === META ===
+        "ladybug.capabilities" => {
+            // Report what this backend can do.
+        }
+
+        _ => Err(Error::ExecutionError(format!("Unknown procedure: {name}")))
     }
 }
 ```
 
-### Phase D: Acceptance Test (2 days)
+---
 
-Load `aiwar_full.cypher` through LadybugBackend:
+## 3. Beyond Standard Cypher — What This Enables
 
-1. All 5 constraints create properly
-2. All 221 nodes create with correct label hashes
-3. All 356 relationships create with correct verb slots
-4. `MATCH (n) RETURN count(n)` returns 221
-5. `MATCH ()-[r]->() RETURN count(r)` returns 356
-6. `MATCH (a)-[:CONNECTED_TO]->(b) WHERE r.label = 'invests in' RETURN a, b` works
-7. `CALL ladybug.search(fingerprint, 10)` returns resonance-ranked results
-8. Results match MemoryBackend for all standard Cypher queries
+### 3.1 NARS-Augmented Queries
 
-**NARS calibration**: After loading, the 356 relationships provide ground-truth
-evidence for initializing NARS frequency/confidence values per verb type.
+Standard Cypher:
+```cypher
+MATCH (a:Company)-[:INVESTS_IN]->(b:Company) RETURN a, b
+```
 
-### Phase E: NARS Pipeline Wiring (3 days)
+Ladybug-augmented:
+```cypher
+// Find investment relationships with high confidence
+MATCH (a:Company)-[r:INVESTS_IN]->(b:Company)
+CALL ladybug.truth(a) YIELD confidence AS a_conf
+CALL ladybug.truth(b) YIELD confidence AS b_conf
+WHERE a_conf > 0.7 AND b_conf > 0.7
+RETURN a.name, b.name, a_conf, b_conf
+ORDER BY a_conf * b_conf DESC
+```
 
-Wire the competitive advantage pipeline:
+### 3.2 Resonance Search (Semantic Nearest Neighbors)
 
-1. **DN tree navigate**: Use `PackedDn` for O(1) hierarchy traversal
-2. **Hamming popcount**: Use `Container::hamming()` (already 128 XOR + 128 popcount)
-3. **HDR stacking**: Wire `HdrCascadeExec` from search module (L0→L4)
-4. **NARS update**: After each search result, call `TruthValue::revision()` to
-   accumulate evidence (frequency + confidence)
-5. **Exact causality**: After sufficient evidence, `TruthValue::deduction()` +
-   `TruthValue::abduction()` for causal inference
+```cypher
+// Find nodes similar to "artificial intelligence regulation"
+CALL ladybug.search("artificial intelligence regulation", 10) YIELD nodeId, score
+MATCH (n) WHERE id(n) = nodeId
+RETURN n.name, score
+ORDER BY score DESC
+```
+
+### 3.3 Causal Inference
+
+```cypher
+// Given: A invests_in B, B develops C
+// Infer: A indirectly_supports C (NARS deduction)
+MATCH (a)-[:INVESTS_IN]->(b)-[:DEVELOPS]->(c)
+CALL ladybug.deduction(a, b, c) YIELD frequency, confidence
+WHERE confidence > 0.5
+RETURN a.name AS investor, c.name AS technology, frequency, confidence
+```
+
+### 3.4 Spine Queries (Cluster Fingerprinting)
+
+```cypher
+// XOR-fold all TechCompany nodes into a cluster fingerprint
+CALL ladybug.spine("TechCompany") YIELD spine, count, popcount
+// Then find nodes similar to the cluster centroid
+CALL ladybug.search(spine, 5) YIELD nodeId, score
+RETURN nodeId, score
+```
+
+### 3.5 Counterfactual Reasoning
+
+```cypher
+// Pearl's rung 3: "What if Google hadn't acquired DeepMind?"
+MATCH (google:Company {name: "Google"})-[r:ACQUIRES]->(dm:Company {name: "DeepMind"})
+CALL ladybug.counterfactual(r) YIELD affected_nodes, belief_delta
+RETURN affected_nodes, belief_delta
+```
+
+### 3.6 DN Tree Navigation
+
+```cypher
+// Navigate the cognitive hierarchy
+CALL ladybug.dn.navigate("Ada:A:soul:identity") YIELD addr, depth, rung
+// Walk up
+CALL ladybug.dn.ancestors(addr) YIELD ancestor_addr, ancestor_depth
+MATCH (n) WHERE ladybug.addr(n) = ancestor_addr
+RETURN n, ancestor_depth
+```
 
 ---
 
-## 4. File-Level Change Map
+## 4. Implementation Sequence
 
-### In neo4j-rs (NEW files):
+### Phase 1: BindSpace Backend Scaffold
 
-| File | Contents | Lines (est.) |
-|------|----------|:------------:|
-| `src/storage/ladybug.rs` | LadybugBackend + StorageBackend impl | ~500 |
-| `src/storage/ladybug/translator.rs` | NodeTranslator, VerbTable | ~200 |
-| `src/storage/ladybug/fingerprint.rs` | PropertyFingerprinter, LabelBinder | ~150 |
-| `src/storage/ladybug/procedures.rs` | 10 ladybug.* procedure handlers | ~300 |
-| `tests/ladybug_backend.rs` | Acceptance tests with aiwar_full.cypher | ~200 |
+Create `src/storage/ladybug/mod.rs` with:
+- `LadybugBackend` struct wrapping `BindSpace`
+- Bidirectional `NodeId ↔ Addr` mapping
+- Bidirectional `RelId ↔ edge_index` mapping
+- Property/label side storage for RETURN projections
+- `impl StorageBackend for LadybugBackend` — all CRUD methods
 
-### In neo4j-rs (MODIFIED files):
+All standard Cypher operations MUST produce identical results to
+MemoryBackend. This is the correctness baseline.
 
-| File | Change |
-|------|--------|
-| `Cargo.toml` | Add `ladybug-contract` optional dep |
-| `src/storage/mod.rs` | Add 5 gap methods to StorageBackend (all with defaults) |
-| `src/storage/mod.rs` | Add `BackendCapabilities` struct |
-| `src/storage/mod.rs` | `pub mod ladybug;` (feature-gated) |
+### Phase 2: Verb Resolution
 
-### In ladybug-rs (NO changes to contract crate):
+Map Neo4j relationship types to BindSpace Surface 0x07 verbs:
+- 28 pre-initialized verbs (CAUSES through PREV_SIBLING)
+- Dynamic registration for unknown verbs
+- Aiwar pattern: `CONNECTED_TO` + `r.label` property → verb lookup
 
-| File | Change | Why |
-|------|--------|-----|
-| None in `ladybug-contract/` | NO CHANGES | Types are complete and frozen |
+### Phase 3: Property Fingerprinting
 
-### In ladybug-rs main crate (OPTIONAL, future):
+When a node is created:
+1. Sort property keys alphabetically
+2. XOR-bind each (key, value) pair into a 256-word fingerprint
+3. Write fingerprint to BindSpace via `space.write(fp)`
+4. Meta container (words 0-127): NARS truth, label_hash, inline edges
+5. Content container (words 128-255): semantic fingerprint for search
 
-| File | Change | Why |
-|------|--------|-----|
-| `src/storage/neo4j_bridge.rs` (new) | HTTP endpoint for neo4j-rs integration | Phase 7A cross-process |
-| `src/flight/neo4j_actions.rs` (new) | Arrow Flight actions for bulk transfer | Phase 7A Arrow Flight |
+### Phase 4: CALL Procedures
+
+Register 15+ procedures:
+- 4 VSA: search, bind, unbind, similarity
+- 4 NARS: truth, revise, deduction, abduction
+- 3 DN: navigate, ancestors, children
+- 2 Causal: rung, counterfactual
+- 1 Spine: xor-fold
+- 1 Crystal: crystallize
+
+### Phase 5: Acceptance Test with aiwar_full.cypher
+
+- 221 nodes create with correct fingerprints
+- 356 relationships create with correct verb bindings
+- All standard Cypher queries match MemoryBackend results
+- NARS truth values accumulate from relationship evidence
+- `ladybug.search()` returns resonance-ranked results
+- Spine queries produce correct XOR-folds per label
+
+### Phase 6: NARS Calibration Pipeline
+
+After loading aiwar data:
+1. For each verb type, count evidence (pos/neg)
+2. Initialize `TruthValue::from_evidence(pos, neg)` per verb
+3. Run `TruthValue::revision()` to merge multiple evidence sources
+4. Run `TruthValue::deduction()` for transitive inferences
+5. Crystallize high-confidence beliefs
 
 ---
 
-## 5. Dependency Graph
+## 5. Dependency Graph (Corrected)
 
 ```
 neo4j-rs
-  └── ladybug-contract (optional, feature = "ladybug")
-        ├── Container          (8192-bit vector, all ops)
-        ├── CogRecord          (meta + content)
-        ├── ContainerGeometry  (Cam/Xyz/Bridge/Extended/Chunked/Tree)
-        ├── MetaView/Mut       (zero-copy metadata access)
-        ├── TruthValue         (NARS truth functions)
-        ├── CogPacket          (wire protocol)
-        └── CognitiveAddress   (64-bit address)
-
-Note: neo4j-rs does NOT depend on ladybug (main crate).
-      Only the contract crate. This keeps the dependency minimal:
-      pure types, no I/O, no storage, no network.
+  └── ladybug (main crate, optional, feature = "ladybug")
+        ├── BindSpace              (THE storage — 65K addressable slots)
+        │   ├── Addr(prefix:slot)  (O(1) array indexing, 3-5 cycles)
+        │   ├── BindNode           (256 u64 fingerprint + label + parent + rung)
+        │   ├── BindEdge           (from ⊕ verb ⊕ to, XOR-bound)
+        │   ├── BitpackedCsr       (zero-copy edge traversal)
+        │   ├── DnIndex            (PackedDn ↔ Addr bidirectional)
+        │   └── DirtyBits          (65536-bit change tracking)
+        ├── Container              (8192-bit, 128 × u64)
+        ├── MetaView / MetaViewMut (zero-copy metadata, 50+ accessors)
+        ├── PackedDn               (7-level hierarchy, u64)
+        ├── SpineCache             (XOR-fold, lazy recompute)
+        └── TruthValue             (NARS, full NAL truth functions)
 ```
 
----
-
-## 6. What NOT to Scaffold
-
-Resist the temptation to scaffold:
-
-1. **SpineCache in neo4j-rs** — SpineCache lives in ladybug main crate.
-   LadybugBackend creates a local SpineCache instance but the type
-   comes from a future in-process integration (Phase 7A), not now.
-
-2. **HdrCascadeExec in neo4j-rs** — The HDR cascade is a ladybug search
-   primitive. In Phase 4, vector_query() calls into ladybug-rs via HTTP
-   or Arrow Flight. In Phase 7A, it calls in-process.
-
-3. **CogRedis protocol** — neo4j-rs talks Cypher, not Redis. The CogRedis
-   layer is internal to ladybug-rs.
-
-4. **BindSpace addressing** — neo4j-rs uses NodeId(u64). The mapping to
-   Addr(prefix:slot) happens inside LadybugBackend, invisible to the rest
-   of neo4j-rs.
-
-5. **New ContainerGeometry variants** — The existing 6 cover all cases.
-   The Jina hybrid uses `Bridge` geometry (CAM proxy + external vector).
+**neo4j-rs depends on ladybug main crate, NOT just ladybug-contract.**
+BindSpace, PackedDn, SpineCache are in the main crate.
 
 ---
 
-## 7. Success Criteria
+## 6. File-Level Change Map (Corrected)
 
-The integration is complete when:
+### In neo4j-rs (NEW files):
 
-1. `cargo build --features ladybug` compiles neo4j-rs with ladybug-contract
-2. `LadybugBackend` passes all existing MemoryBackend test cases
-3. `aiwar_full.cypher` loads through LadybugBackend with correct results
-4. `CALL ladybug.search(fp, k)` returns resonance-ranked results
-5. NARS truth values accumulate from aiwar relationship evidence
-6. No changes to ladybug-contract were needed (types were already correct)
+| File | Contents | Est. Lines |
+|------|----------|:----------:|
+| `src/storage/ladybug/mod.rs` | LadybugBackend + StorageBackend impl | ~600 |
+| `src/storage/ladybug/procedures.rs` | 15+ CALL procedure handlers | ~400 |
+| `src/storage/ladybug/fingerprint.rs` | Property → 256-word fingerprint | ~100 |
+| `tests/ladybug_backend.rs` | Acceptance tests (aiwar + NARS) | ~300 |
+
+### Files to REMOVE (premature scaffold from rev 1):
+
+| File | Why |
+|------|-----|
+| `src/storage/ladybug/translator.rs` | Duplicates PackedDn + DnIndex in BindSpace |
+| `src/storage/ladybug/verbs.rs` | Duplicates Surface 0x07 verb table in BindSpace |
+
+### In neo4j-rs (MODIFIED):
+
+| File | Change |
+|------|--------|
+| `Cargo.toml` | Change dep from `ladybug-contract` to `ladybug` |
+| `src/storage/mod.rs` | `pub mod ladybug;` (feature-gated) |
+
+### In ladybug-rs:
+
+| File | Change |
+|------|--------|
+| **NONE** | **NO CHANGES. Period.** |
 
 ---
 
-## 8. Timeline
+## 7. What NOT to Duplicate
 
-```
-Week 1: Phase A (dep wiring) + Phase B (translation layer)
-Week 2: Phase C (LadybugBackend scaffold) + Phase D (acceptance test)
-Week 3: Phase E (NARS pipeline) + polish + integration testing
-```
+Now that I've read the code, these are the types I was about to duplicate
+and shouldn't have:
 
-Total: ~12 working days for a fully functional LadybugBackend with
-NARS calibration from aiwar data.
+| Type I Almost Duplicated | Where It Already Lives | Method |
+|--------------------------|----------------------|--------|
+| PackedDn | `container/adjacency.rs` | `from_path()`, `parent()`, `child()` |
+| VerbTable (144 verbs) | BindSpace Surface 0x07 | `space.verb("CAUSES")` |
+| NodeTranslator | BindSpace.DnIndex | `dn_index.register()`, `addr_for()` |
+| PropertyFingerprinter | BindSpace | `label_fingerprint()` |
+| ContainerDto | `Container` in ladybug-contract | Exact same struct |
+| Edge storage | BindSpace.edges + BitpackedCsr | `link()`, `edges_out()` |
+| Dirty tracking | BindSpace.DirtyBits | `mark_dirty()`, `dirty_addrs()` |
+| NARS revision | BindSpace | `nars_revise(addr, f, c)` |
+
+The only thing neo4j-rs needs to add is the **NodeId ↔ Addr mapping**
+(because Neo4j uses sequential u64 IDs while BindSpace uses prefix:slot
+addressing) and **property side storage** (because BindSpace stores
+fingerprints, not original strings).
 
 ---
 
-*This plan builds entirely on frozen ladybug-contract types. Zero schema
-changes needed. The architecture is already in the code — this plan just
-wires neo4j-rs to it.*
+## 8. Success Criteria
+
+1. `cargo build --features ladybug` compiles
+2. All existing MemoryBackend tests pass with LadybugBackend
+3. `aiwar_full.cypher` loads: 221 nodes, 356 relationships
+4. `CALL ladybug.search("AI regulation", 10)` returns ranked results
+5. `CALL ladybug.truth(nodeId)` returns NARS freq/conf
+6. `CALL ladybug.spine("TechCompany")` returns XOR-fold
+7. Zero changes to ladybug-rs
+8. BindSpace.stats() shows correct surface/fluid/node counts
+
+---
+
+*Rev 2: Corrected after reading bind_space.rs (2087 lines), adjacency.rs
+(632 lines), spine.rs (204 lines), cam_ops.rs (4096 ops). The architecture
+is far more complete than Rev 1 assumed. BindSpace IS the DTO.*
