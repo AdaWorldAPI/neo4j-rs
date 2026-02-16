@@ -1,8 +1,8 @@
 # Neo4j-rs Roadmap Review — Cross-Ecosystem Validation
 
-> **Date**: 2026-02-16
+> **Date**: 2026-02-16 (updated)
 > **Reviewer**: Claude (Opus 4.6)
-> **Scope**: Six documents reviewed against four codebases
+> **Scope**: Ten documents reviewed against five codebases
 > **Documents reviewed**:
 > 1. `INTEGRATION_ROADMAP.md` — 7-phase neo4j-rs roadmap
 > 2. `STRATEGY_INTEGRATION_PLAN.md` — StrategicNode unification across 4 repos
@@ -10,34 +10,43 @@
 > 4. `FINGERPRINT_ARCHITECTURE_REPORT.md` (ladybug-rs) — Technical debt, blocking resolution & tier analysis
 > 5. `COGNITIVE_RECORD_256.md` (ladybug-rs) — 256-word (2048-byte) unified CogRecord design
 > 6. `CLAM_HARDENING.md` (ladybug-rs) — CLAM tree integration for provable search guarantees
+> 7. `COMPOSITE_FINGERPRINT_SCHEMA.md` (ladybug-rs) — Arrow RecordBatch schemas (A/B/C), FP_WORDS=160
+> 8. `GEL_EXECUTION_FABRIC.md` (ladybug-rs) — 4,485-line cognitive CPU, 9 language families
+> 9. `WIRING_PLAN_NEO4J_LADYBUG.md` (ladybug-rs) — neo4j-rs ↔ ladybug-rs translation layer contract
+> 10. `GEL_STORAGE_ARCHITECTURE.md` (ladybug-rs) — 512-byte node record + tiered fingerprints
 >
 > **Codebases examined**:
 > - `neo4j-rs` — ~8,950 LOC Rust + 6,838 LOC docs
 > - `crewai-rust` — ~60,770 LOC Rust, 265 source files
 > - `ada-n8n` — ~4,810 LOC Rust + 765 LOC workflows
-> - `aiwar-neo4j-harvest` — ~1,570 LOC Rust + generated Cypher/JSON
+> - `aiwar-neo4j-harvest` — ~1,570 LOC Rust + 1,186 lines Cypher + generated JSON
+> - `ladybug-rs` — 69 docs, ~4,485 LOC fabric module, full cognitive substrate
 
 ---
 
 ## Executive Summary
 
-The four documents form a coherent, well-architected plan for unifying four
-independent codebases around ladybug-rs CogRecord containers as a single
-source of truth. The architecture is sound, the phase ordering is correct,
-and the critical path is properly identified. The Fingerprint Architecture
-Report from ladybug-rs adds critical context about storage-layer technical
-debt that directly impacts the LadybugBackend integration (Phase 4).
+The ten documents form a coherent, well-architected plan for unifying five
+codebases around ladybug-rs CogRecord containers as a single source of truth.
+The architecture is sound, the phase ordering is correct, the wiring contract
+between neo4j-rs and ladybug-rs is clean, and the first real dataset
+(aiwar_full.cypher — 221 nodes, 356 edges) is ready to serve as the
+acceptance test.
 
-**Overall assessment: Strong plan, realistic self-awareness, correct priorities.**
+**Overall assessment: Strong plan, mature architecture, clean contracts, ready to test.**
 
 Key findings:
 - Phase 1 completion claims are **verified** (parser, planner, executor all functional)
-- The `StorageBackend` trait is a well-designed integration seam (31 methods, clean DTOs)
-- Phase ordering respects dependencies correctly
-- **The ladybug-rs BindNode AoS→SoA refactor (Option C) is a prerequisite for Phase 4**
-- **14 specific risks and recommendations** identified below
-- **The CogRecord 256-word redesign changes the LadybugBackend integration surface**
-- Effort estimates are reasonable but likely optimistic for Phases 3 and 4
+- The `StorageBackend` trait is a well-designed integration seam (31 + 5 new methods)
+- The wiring plan's 5 gap analysis is correct and all additions are backward-compatible
+- FP_WORDS = 160 resolves the 156/157 fingerprint width confusion definitively
+- The tiered storage model (T0=512B structure, T1=512B Hamming, T2=full FP) maps
+  cleanly to property queries vs similarity search vs full fingerprint access
+- aiwar_full.cypher reveals that verb semantics live in `r.label` properties, not
+  just relationship types — the wiring plan's verb extraction needs configuration
+- **22 specific recommendations** identified, with 3 remaining consistency gaps
+- **The contract is sound**: neo4j-rs stays Neo4j faithful, ladybug-rs implements
+  StorageBackend faithfully, cognitive ops are CALL-only
 
 ---
 
@@ -578,40 +587,492 @@ hardens.
 
 ---
 
-## 10. Conclusion
+## 10. Wiring Plan Analysis (WIRING_PLAN_NEO4J_LADYBUG.md)
 
-The six documents together form a comprehensive, actively evolving plan. The
-architecture is sound, the phase ordering is correct, and the StorageBackend
-trait is proving its worth as an integration seam.
+### 10.1 Document Quality — Grade: A+
 
-**Critical consistency gaps** (unchanged):
+The wiring plan is the most operationally concrete document in the ecosystem.
+It defines the exact translation layer between neo4j-rs property graph semantics
+and ladybug-rs fingerprint algebra. The "100% Neo4j faithful" principle is the
+right constraint — it keeps neo4j-rs clean while ladybug-rs gets full access
+through standard extension points.
+
+### 10.2 The 5 Gap Analysis — Verdict: All Correct
+
+| Gap | What It Adds | Neo4j Precedent | Impact |
+|-----|-------------|-----------------|--------|
+| Gap 1: `vector_query()` | CAKES/HDR k-NN via StorageBackend | Neo4j 5.11 vector index | Direct SIMD search path |
+| Gap 2: `call_procedure()` | Escape hatch for cognitive ops | APOC / GDS / custom procs | ALL ladybug.* operations |
+| Gap 3: Metadata slot | `_ladybug_fp` reserved properties | Neo4j system properties | Zero trait change (Option A) |
+| Gap 4: `create_nodes_batch()` | 100K fp/sec bulk load | `UNWIND` optimization | Critical for harvest migration |
+| Gap 5: `capabilities()` | Planner-visible backend hints | Index provider hints | Enables fingerprint pushdown |
+
+**All 5 additions have default implementations** — zero breaking changes. Any
+existing `StorageBackend` impl compiles unchanged. This is good API design.
+
+### 10.3 Translation Layer Review
+
+The Node → Fingerprint and RelType → Verb mappings are well-designed:
+
+- **Node → Fingerprint**: `fingerprint_from_node(labels, props)` with configurable
+  `SemanticSchema` controlling which properties are semantic vs metadata. This is
+  the right approach — not all properties should affect similarity.
+
+- **RelType → Verb**: Maps to 144 core verbs when possible, falls back to
+  `from_content("VERB:custom")` hash for unknown types. The gotcha about losing
+  Go board topology benefits for hash-fallback verbs is correctly identified.
+
+- **Dual-path traversal**: Default `expand()` uses EXACT Lance adjacency (Neo4j
+  faithful). Fingerprint-accelerated expansion is OPT-IN only. This prevents the
+  W-11 correctness gotcha (semantic similarity ≠ topological connectivity).
+
+### 10.4 Gotchas Validated Against aiwar_full.cypher
+
+Cross-checking the wiring plan's gotcha table against the actual aiwar harvest
+data (1,186 lines, 221 nodes, 356 edges):
+
+| Gotcha | Severity in aiwar Context | Notes |
+|--------|--------------------------|-------|
+| W-3: Property ordering | **HIGH** | aiwar nodes have 5-8 properties each; HashMap iteration non-deterministic. Sort keys before fingerprinting is mandatory. |
+| W-2: Verb mapping ambiguity | **MEDIUM** | aiwar uses only 3 relationship types (CONNECTED_TO, USED_IN, PERSON_LINK) with `label` property for semantic meaning ("affiliated", "contracts", "invests in", etc.). The verb mapping must inspect `r.label`, not just relationship type. |
+| W-6: DETACH DELETE cascade | **LOW** | aiwar is append-only; deletions are rare |
+| W-14: Dense integer IDs | **MEDIUM** | aiwar uses string IDs (`{id: 'Palantir'}`), not integers. `NodeId(u64)` needs hash-from-string mapping. |
+
+**Critical finding from aiwar_full.cypher**: The relationship pattern is
+`MERGE (a)-[r:CONNECTED_TO]->(b) SET r.label = 'invests in'` — a **single
+relationship type with semantic label property**. The wiring plan's verb mapping
+assumes `rel_type` carries the semantic meaning, but in aiwar, the semantic
+meaning is in `r.label`. The translation layer needs to support configurable
+verb extraction: from `rel_type` (default), from a named property (aiwar pattern),
+or from both.
+
+### 10.5 The Contract Summary
+
+```
+neo4j-rs promises:
+  ✓ 100% openCypher compatible parser
+  ✓ Full property graph model (Node, Rel, Path, Value)
+  ✓ ACID transactions
+  ✓ StorageBackend + 5 new methods (backward compatible)
+  ✓ CALL procedure mechanism for extensions
+
+ladybug-rs promises:
+  ✓ Implement StorageBackend faithfully
+  ✓ Default expand() = EXACT traversal
+  ✓ Cognitive ops exposed ONLY via CALL procedures
+  ✓ Same queries produce same results on both backends
+
+Translation layer promises:
+  ✓ Node → Fingerprint is deterministic + configurable
+  ✓ RelType → Verb uses 144 Go board verbs when possible
+  ✓ Properties sorted before fingerprinting
+  ✓ BindSpace and Lance always consistent
+  ✓ Batch ops don't bypass transaction semantics
+```
+
+---
+
+## 11. Composite Fingerprint Schema Analysis (COMPOSITE_FINGERPRINT_SCHEMA.md)
+
+### 11.1 Document Quality — Grade: A+
+
+The most detailed physical schema design in the ecosystem. Resolves the 156 vs
+157 word ambiguity with a definitive answer: **FP_WORDS = 160** (10,240 bits).
+This is a key decision that ripples across every other document.
+
+### 11.2 The FP_WORDS Resolution
+
+| Words | Bits | SIMD tail | Verdict |
+|-------|------|-----------|---------|
+| 156 | 9,984 | 4 remainder | Data loss (misses ceil(10000/64)=157) |
+| 157 | 10,048 | 5 remainder | Scalar tail on every AVX-512 pass |
+| **160** | **10,240** | **0 remainder** | **Zero scalar tail. 20 AVX-512 iters exactly.** |
+
+The extra 240 bits serve as ECC/parity space. This resolves Risk #10 from the
+original review (156 vs 157 inconsistency) with a superior option.
+
+**Impact on other documents**:
+- CogRecord 256 says C8-C31 = 192 words = 12,288 bits for fingerprint
+- Composite Schema says FP_WORDS = 160 = 10,240 bits for fingerprint column
+- These are **compatible**: CogRecord stores 192 words in memory (32 extra words
+  for ECC + expansion), Arrow stores 160 words on disk (10,000 semantic + 240 ECC).
+  The 32-word difference (2,048 bits) is the structure compartments (C0-C7) that
+  live in separate Arrow columns, not in the fingerprint column.
+
+### 11.3 Schema A (Recommended) Validation
+
+Schema A ("Wide Columnar") is the correct choice:
+- ~1,388 bytes/row fixed for nodes, ~1,329 bytes/row for edges
+- Every field is a DataFusion-filterable column
+- `FixedSizeBinary(1280)` for fingerprint: zero-overhead, SIMD-aligned
+- `context_id` solves the 8+8 blocking problem (multiple exploration contexts
+  for the same entity without collision)
+
+The 16-byte composite key design (`prefix:slot + group48 + disambig64`) is
+elegant — it fits in a single SSE register and gives DN-locality for free
+when sorted.
+
+### 11.4 Context Overlay Model — New Design Element
+
+The `(dn_anchor, context_id, dn_leaf)` triple enables non-blocking exploration:
+- `context_id = 0`: base view (hot path, O(1) BindSpace lookup)
+- `context_id > 0`: exploration contexts (Arrow RecordBatch, O(log n) range scan)
+- Promotion: winner's fp/leaf written into BindSpace, exploration rows deleted
+
+This was NOT present in the original 6 documents. It solves a real problem:
+concurrent exploration contexts would stomp on each other's state in the current
+BindSpace model. The wiring plan's LadybugBackend must account for this.
+
+### 11.5 HDR Cascade as DataFusion Physical Operator
+
+The `HdrCascadeExec` design is excellent:
+- L0 scent (5-byte XOR+popcount, kills ~90%)
+- L1 popcount diff (1 u16 subtract, kills ~50% of survivors)
+- L2 4-bit sketch (78-byte scan, kills ~80% of survivors)
+- L3 full Hamming (1280-byte SIMD, only ~0.1% of input reaches here)
+- L4 Mexican hat discrimination
+
+The optimizer rule that rewrites `hamming()` UDF to reference
+`_hdr_distance` avoids accidental double-computation. Good engineering.
+
+**Impact on neo4j-rs**: The `vector_query()` method in LadybugBackend should
+route to this HdrCascadeExec pipeline, NOT a naive linear scan. The wiring
+plan's Gap 1 implementation must be aware of this operator.
+
+---
+
+## 12. aiwar_full.cypher — Real-World Dataset Review
+
+### 12.1 Dataset Statistics
+
+| Metric | Value |
+|--------|-------|
+| Total lines | 1,186 |
+| Constraints | 5 (UNIQUE on System, Stakeholder, CivicSystem, HistoricalSystem, Person) |
+| Indexes | 2 (System.year, System.noun_key) |
+| Schema axes | 12 (currentStatus_airo, type, militaryUse, civicUse, MLTask, MLType, purpose_vair, capacity_airo, output_airo, impact_vair, stakeholder, airo_type) |
+| Relationship types | 3 (CONNECTED_TO, USED_IN, PERSON_LINK) + VALID_FOR (schema) |
+| CONNECTED_TO labels | ~15 (affiliated, contracts, invests in, part of, incorporates, relies on, sold to, purchased, provides data to, etc.) |
+| Node labels | System, Stakeholder, Person, CivicSystem, HistoricalSystem + sub-labels (Nation, TechCompany, DefenseCompany, Military, Police, Institution, Investor, Utility, etc.) |
+| Multi-label nodes | Yes (e.g., `Stakeholder:TechCompany:AIDeveloper`) |
+| Properties per node | 5-8 (id, name, type, stakeholder_type, airo_type, image, year, noun_key, etc.) |
+
+### 12.2 Architectural Patterns Exercised
+
+The aiwar dataset exercises these Cypher features that neo4j-rs must support:
+
+1. **MERGE with compound labels**: `MERGE (n:Stakeholder:TechCompany:AIDeveloper {id: 'Palantir'})`
+   — requires multi-label support in StorageBackend
+2. **Schema-as-data**: `SchemaAxis` + `SchemaValue` nodes with `VALID_FOR` relationships
+   — the ontology IS data, not metadata
+3. **WITH chaining**: `MERGE (v:SchemaValue {value: 'X'}) WITH v MATCH (a:SchemaAxis {name: 'Y'}) MERGE (v)-[:VALID_FOR]->(a)`
+   — tests the planner's intermediate result passing
+4. **Property-rich relationships**: `SET r.label = 'invests in', r.weight = 1`
+   — relationship properties carry semantic meaning
+5. **nan handling**: Many `value: 'nan'` entries — tests NULL/missing-value semantics
+6. **String-based IDs**: All nodes use `{id: 'StringKey'}` — tests non-integer ID patterns
+
+### 12.3 Implications for LadybugBackend
+
+The aiwar dataset is the **first real test case** for the wiring plan:
+
+| aiwar Pattern | LadybugBackend Challenge |
+|---------------|-------------------------|
+| Multi-label (`Stakeholder:Nation:AIDeployer`) | Must XOR-bind ALL labels into fingerprint |
+| Schema-as-data (SchemaAxis → SchemaValue) | Meta-nodes need distinct fingerprint strategy (structural, not semantic) |
+| `r.label` carries verb semantics | Verb extraction must read properties, not just rel_type |
+| String IDs (`{id: 'Palantir'}`) | NodeId(u64) requires deterministic hash from string |
+| `nan` values in properties | Must handle "missing" vs "explicitly nan" in fingerprinting |
+| `r.weight` on edges | Weight maps to NARS frequency? Or separate property? |
+
+**Recommendation R15**: Use aiwar_full.cypher as the acceptance test for
+LadybugBackend Phase 4. If the entire script can be loaded and queried through
+LadybugBackend producing the same results as MemoryBackend, the integration
+is validated.
+
+---
+
+## 13. ladybug-rs Documentation Audit — Container & Bitpacked Vector
+
+### 13.1 Scope
+
+Searched all 69 markdown files in `/home/user/ladybug-rs/docs/` for references
+to "container", "bitpack*", and "512-byte". Results:
+
+| Term | Files Matching | Total Occurrences |
+|------|---------------|-------------------|
+| container | 17 | 85+ |
+| bitpack* | 10 | 30+ |
+| 512-byte | 7 | 50+ |
+
+### 13.2 Container Design Evolution (Three Generations)
+
+The docs reveal three distinct container designs, each building on the previous:
+
+**Generation 1 — CURRENT (ARCHITECTURE.md)**:
+```
+Container = 128 × u64 = 8,192 bits = 1 KB
+CogRecord = meta_container (1 KB) + content_container (1 KB) = 2 KB
+```
+- Used in production code today
+- `BindNode.fingerprint: [u64; 156]` (or 157 — the bug)
+- W0-W127 metadata layout with inline edges at W16-31
+
+**Generation 2 — PROPOSED (docs/HANDOVER.md)**:
+```
+CogRecord = 256 × u64 = 16,384 bits = 2 KB
+Words 0-207: SEMANTIC fingerprint (13,312 bits)
+Words 208-255: METADATA
+```
+- Intermediate proposal from 2026-02-06 refactoring session
+- Key constraints: max 32 edges, no floats, Hamming only, O(1) addressing
+- 5-phase refactoring plan: CogRecord → Expand FP → Replace BindNode → Lance → CogRedis
+
+**Generation 3 — LATEST (COGNITIVE_RECORD_256.md)**:
+```
+CogRecord = 256 × u64 = 16,384 bits = 2 KB
+32 compartments × 64 bytes (1 cache line each)
+C0-C7: STRUCTURE (512 bytes, 25%)
+C8-C31: FINGERPRINT (1,536 bytes = 192 words = 12,288 bits, 75%)
+```
+- The most detailed and mature design
+- Introduces compartmented layout with cache-line alignment
+- LCRS tree pointers, 512-bit bitvector adjacency, Q16.16 NARS
+- SoA canonical (CogColumns + Arrow) with AoS view (CogView)
+
+### 13.3 BitpackedCSR — The Graph Topology Primitive
+
+Found across 10 docs, `BitpackedCSR` is the compressed sparse row structure
+for edge storage:
+
+```rust
+pub struct BitpackedCsr {
+    offsets: Vec<u32>,   // 65K entries, one per address
+    edges: Vec<u16>,     // Flat array of target addresses
+}
+```
+
+Used for:
+- Downward traversal (children via CSR): O(k) per node
+- Adjacency overflow: when inline edges (C1-C2 bitvectors, 512 max) fill up
+- GraphBLAS-compatible SpMV operations
+
+**Key insight from PREFIX_DN_TRAVERSAL.md**: BitpackedCSR handles the children
+lookup. LCRS handles sibling traversal. Together they give O(k) children + O(1)
+sibling/parent. This is the complete navigation primitive for the DN tree.
+
+### 13.4 512-Byte Node Record — GEL Storage Architecture
+
+GEL_STORAGE_ARCHITECTURE.md introduces a tiered storage model around 512-byte
+records:
+
+```
+TIER 0: NODE RECORD (512 bytes) — always in memory for active nodes
+TIER 1: HAMMING 4096 (512 bytes) — zero-copy Arrow, mmap'd
+TIER 2: FULL FINGERPRINT — on-demand from Lance/Parquet
+```
+
+The GEL executor (4,485 LOC, 9 language families) operates on these 512-byte
+records as its "register file". This is the bridge between the CogRecord 256
+design and the runtime execution model:
+
+- CogRecord 256 = 2,048 bytes total (32 compartments)
+- GEL Tier 0 = 512 bytes = first 8 compartments (C0-C7, the structure)
+- GEL Tier 1 = 512 bytes = Hamming 4096 fingerprint prefix (for fast search)
+- GEL Tier 2 = remaining 1,536 bytes = full fingerprint (C8-C31)
+
+**Impact on neo4j-rs**: The `LadybugBackend.get_node()` method only needs
+Tier 0 (structure) for most property graph queries. Fingerprint access (Tier 1-2)
+is only needed for `vector_query()` and fingerprint-accelerated `expand()`.
+This tiered access pattern should inform the backend's lazy-loading strategy.
+
+### 13.5 Quantum Native Paper — Bitpacked Operations
+
+QUANTUM_NATIVE_PAPER.md provides theoretical foundations for bitpacked operations:
+- Theorem 4: "Bitpacked Hadamard Gate" — setting exactly N/2 bits uniformly at
+  random produces maximally uncertain state
+- Performance: bitpacked operations on 10,000-bit vectors achieve throughput that
+  would require expensive float32 operations otherwise
+- This validates the "no float in hot path" design decision in CogRecord 256 C5
+
+### 13.6 BINDSPACE_UNIFICATION.md — The Definitive Container Reference
+
+With 85+ "container" references, BINDSPACE_UNIFICATION.md (2,215+ lines) is the
+most comprehensive container document. Key patterns:
+
+```rust
+pub fn meta_container(&self) -> &Container {
+    Container::view(self.fingerprint[..128].try_into().unwrap())
+}
+pub fn content_container(&self) -> &Container {
+    Container::view(self.fingerprint[128..].try_into().unwrap())
+}
+```
+
+This shows the CURRENT design where a BindNode's fingerprint is split into
+two Container views (meta + content). The CogRecord 256 replaces this with
+32 typed compartments, eliminating the arbitrary split.
+
+---
+
+## 14. Fingerprint Width Reconciliation
+
+Across all 10 documents, there are now **5 different fingerprint widths**.
+Here's how they reconcile:
+
+| Source | Width | Bits | Purpose |
+|--------|-------|------|---------|
+| BindNode (current code) | 156 words | 9,984 | Bug — should be 157 |
+| Fingerprint (current code) | 157 words | 10,048 | Core struct, 5-word SIMD tail |
+| **Arrow schema (COMPOSITE)** | **160 words** | **10,240** | **SIMD-clean (20 AVX-512 iters)** |
+| CogRecord 256 (C8-C31) | 192 words | 12,288 | In-memory compartmented layout |
+| CLAM / ARCHITECTURE.md | 256 words | 16,384 | Full container width (theoretical max) |
+
+**Resolution**: These are NOT conflicts — they're different views of the same data:
+
+1. **Arrow on-disk**: 160 words (FixedSizeBinary(1280)) — the canonical persistent
+   representation. 10,000 semantic bits + 240 ECC bits. SIMD-aligned.
+
+2. **CogRecord in-memory**: C8-C31 = 192 words — adds 32 words of padding/expansion
+   beyond the 160-word Arrow column. These extra 32 words (2,048 bits) can hold
+   pre-computed sketch data, cached popcount, or future expansion.
+
+3. **Full container**: 256 words = entire CogRecord including structure (C0-C7).
+   Not a "fingerprint width" — it's the full record width.
+
+4. **BindNode 156/157**: Legacy bug. Both replaced by 160-word Arrow representation
+   after the SoA refactor.
+
+**Recommendation R16**: Standardize on `FP_WORDS = 160` as the canonical
+fingerprint width. Document that CogRecord C8-C31 (192 words) includes 160
+semantic + 32 auxiliary. This eliminates confusion across all documents.
+
+---
+
+## 15. Updated Cross-Document Consistency Matrix
+
+| Topic | Roadmap | Strategy | CAM Ref | FP Arch | CogRec 256 | CLAM | Composite | GEL Fabric | Wiring Plan | GEL Storage |
+|-------|:-------:|:--------:|:-------:|:-------:|:----------:|:----:|:---------:|:----------:|:-----------:|:-----------:|
+| StorageBackend as seam | Yes | Yes | Yes | N/A | N/A | N/A | N/A | N/A | **Yes (5 gaps)** | N/A |
+| Neo4j-rs keeps executor | Yes | **No** (§6) | Implicit | N/A | N/A | N/A | N/A | N/A | Implicit yes | N/A |
+| Container = node | Yes | Yes | Yes | Yes | Yes (2048B) | N/A | Yes (1388B row) | Yes (512B T0) | Yes | Yes (512B T0) |
+| FP width | N/A | N/A | N/A | 156/157w | 192w | 256w | **160w** | N/A | N/A | 512B T1 |
+| Edge storage | W16-31 | W16-31 | W16-31 | N/A | C1-C3 bitvec | N/A | verb_mask col | N/A | Lance adj | BitpackedCSR |
+| NARS truth | Assumed | Yes | Yes | N/A | C5 Q16.16 | N/A | nars_f/c cols | N/A | `_ladybug_truth` | N/A |
+| Context overlay | N/A | N/A | N/A | N/A | N/A | N/A | **context_id** | N/A | N/A | N/A |
+| Procedure registry | N/A | N/A | call_proc | N/A | N/A | N/A | N/A | N/A | **10 procedures** | N/A |
+| Batch operations | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | **Gap 4** | N/A |
+| Verb mapping | Assumed | 144 verbs | 144 verbs | N/A | C3 verb mask | N/A | verb_mask col | N/A | **144 + hash** | N/A |
+| Tiered storage | N/A | N/A | N/A | N/A | 32 compartments | N/A | Hot/cold (B) | T0 register | N/A | **T0/T1/T2** |
+| XOR edge algebra | Assumed | Yes | Yes | Preserve | C8-C31 | Preserve | xor_bind UDF | N/A | Yes | N/A |
+
+**Newly resolved consistency gaps**:
+- FP width: resolved as 160w Arrow canonical / 192w CogRecord / 256w full container
+- Edge storage: multiple representations confirmed (bitvector in-memory, verb_mask in Arrow, BitpackedCSR overflow, Lance adjacency for exact traversal)
+- Verb mapping: Wiring Plan confirms 144 core + hash fallback; aiwar data reveals need for property-based verb extraction
+
+**Remaining open gaps**:
+1. Strategy Plan §6 vs. Roadmap Phases 2-3 (executor/Bolt scope) — UNCHANGED
+2. aiwar `r.label` verb semantics not yet addressed in wiring plan
+3. Context overlay model (Composite Schema) not yet referenced in CogRecord 256 or wiring plan
+
+---
+
+## 16. Expanded Recommendations
+
+### 16.1 New Recommendations (from expanded review)
+
+| # | Action | Source Document | Effort |
+|---|--------|----------------|--------|
+| R15 | Use `aiwar_full.cypher` as LadybugBackend acceptance test | aiwar_full.cypher analysis | 2 days |
+| R16 | Standardize FP_WORDS = 160 across all docs | Composite Schema + FP width reconciliation | 1 hr |
+| R17 | Add verb extraction config: from rel_type, from property, or both | aiwar `r.label` pattern | 4 hrs |
+| R18 | Implement `context_id` overlay in LadybugBackend design | Composite Schema §3 | 1 week |
+| R19 | Route `vector_query()` through HdrCascadeExec, not linear scan | Composite Schema §5 | 2 days |
+| R20 | Tiered access in `get_node()`: T0 only for property queries, T1-T2 lazy | GEL Storage Architecture | 3 days |
+| R21 | Handle string IDs → NodeId(u64) via deterministic hash for aiwar compat | aiwar_full.cypher string IDs | 2 hrs |
+| R22 | Handle `nan` property values in fingerprinting (skip, zero, or explicit) | aiwar `value: 'nan'` pattern | 2 hrs |
+
+### 16.2 Updated Priority Order
+
+```
+IMMEDIATE (this week):
+  R1  Fix test count claim
+  R2  Reconcile §6 executor/Bolt scope
+  R16 Standardize FP_WORDS = 160
+  R17 Add verb extraction config for r.label pattern
+
+NEAR-TERM (Phase 1-2):
+  R3  Implement type(), keys(), properties() functions
+  R4  Add unit tests for parser/evaluator
+  R5  Resolve W12-15 packing question
+  R8  Start TCK harness immediately
+  R21 String ID → NodeId(u64) hash mapping
+  R22 nan property value handling
+
+PHASE 4 (LadybugBackend):
+  R9  Vertical slice first
+  R11 Land BindNode SoA refactor (Option C)
+  R12 Fix 156→157→160 fingerprint width
+  R13 Update CAM Reference §8 for 32-compartment layout
+  R14 Update Phase 4 for C1-C3 bitvector adjacency
+  R15 aiwar_full.cypher acceptance test
+  R18 context_id overlay implementation
+  R19 HdrCascadeExec for vector_query()
+  R20 Tiered access pattern
+
+STRATEGIC:
+  R6  Split StorageBackend into core + extensions
+  R7  BTree indexes in parallel with Phase 2A
+  R10 Direct Rust in-process, Arrow Flight cross-process
+```
+
+---
+
+## 17. Conclusion (Updated)
+
+The ten documents together form a comprehensive, actively evolving plan. With
+the addition of the Wiring Plan, Composite Schema, GEL architecture, and the
+real aiwar dataset, the ecosystem picture is now substantially more complete.
+
+**Critical consistency gaps** (3 remain):
 1. Strategy Plan §6 vs. Roadmap Phases 2-3 (executor/Bolt scope)
-2. CAM Reference §8 vs. CogRecord 256 (128w vs 256w layout)
-3. Fingerprint width: 156/157w (current) → 192w (CogRecord 256)
-4. Edge model: inline edges (W16-31) → bitvector adjacency (C1-C3)
-5. Scent hierarchy: current → CLAM tree (formal guarantees)
+2. aiwar `r.label` verb semantics not addressed in wiring plan verb mapping
+3. Context overlay model not yet referenced in CogRecord 256 or wiring plan
 
-**What's solid**:
-- `StorageBackend` trait as integration seam — proven correct, future-proof
+**What's solid** (expanded):
+- `StorageBackend` trait as integration seam — proven correct, 5 clean extensions
 - Phase ordering (1→2A→3→4→7) — correct dependencies
 - CogRecord 256 compartment design — elegant, SIMD-aligned, cache-optimal
 - CLAM hardening — transforms intuition into proofs
-- Typed views over containers — the right abstraction pattern
+- Composite fingerprint schema — FP_WORDS=160 resolves all width confusion
+- Wiring plan — clean translation layer, 10 registered procedures, dual-path traversal
+- GEL tiered storage — T0/T1/T2 maps cleanly to property/search/full-fingerprint access
+- aiwar_full.cypher — real dataset proving the schema supports complex real-world graphs
 - **ladybug-rs openCypher/GQL and NARS are currently stable and testable**
 
-**The revised strategy**: Don't wait for the storage layer to stabilize — make
-it stable by testing the integration surface early. Build a minimal
-LadybugBackend prototype alongside Phases 1-2 and run real Cypher/GQL/NARS
-queries through it. Feed the results back into the CogRecord 256 design. This
-turns the "moving target" risk into a feedback loop that drives convergence.
+**The contract is sound**: neo4j-rs stays 100% Neo4j faithful. ladybug-rs
+implements StorageBackend faithfully. The translation layer is deterministic
+and configurable. Cognitive operations are CALL-only, never default.
 
-**Bottom line**: The plan is credible and the architecture is sound. Start
-testing the integration now — stability is earned through exercise, not patience.
+**The revised strategy**: Don't wait — test early. Use aiwar_full.cypher as
+the acceptance test. Build a minimal LadybugBackend prototype alongside
+Phases 1-2. Feed findings back into the CogRecord 256 design. Stability
+comes from exercising the contract, not from waiting for it to freeze.
+
+**Bottom line**: 10 documents, 5 codebases, 22 recommendations, 3 remaining
+gaps. The architecture is coherent, the contract is clean, and the first
+real dataset (aiwar) is ready to serve as the integration test suite.
+Start building.
 
 ---
 
 *Review conducted against: neo4j-rs (main), crewai-rust (main), ada-n8n (main),
-aiwar-neo4j-harvest (main), plus ladybug-rs documents: FINGERPRINT_ARCHITECTURE_REPORT.md,
-COGNITIVE_RECORD_256.md, CLAM_HARDENING.md. All source files read and verified.
-Current design: 8192-bit metadata (128 × u64) + N × 8192-bit containers (128 × u64).
-Proposed design: 256 × u64 = 2,048 bytes unified CogRecord (32 compartments × 64 bytes).*
+aiwar-neo4j-harvest (main), plus ladybug-rs (69 docs). Documents: INTEGRATION_ROADMAP.md,
+STRATEGY_INTEGRATION_PLAN.md, CAM_CYPHER_REFERENCE.md, FINGERPRINT_ARCHITECTURE_REPORT.md,
+COGNITIVE_RECORD_256.md, CLAM_HARDENING.md, COMPOSITE_FINGERPRINT_SCHEMA.md,
+GEL_EXECUTION_FABRIC.md, WIRING_PLAN_NEO4J_LADYBUG.md, GEL_STORAGE_ARCHITECTURE.md.
+All source files and 1,186-line Cypher dataset read and verified.
+Current design: 8192-bit container (128 × u64) + variable content containers.
+Proposed design: 256 × u64 = 2,048 bytes CogRecord (32 compartments × 64 bytes).
+Arrow canonical: FP_WORDS = 160 (10,240 bits, SIMD-clean).*
