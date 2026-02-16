@@ -52,7 +52,9 @@ pub mod execution;
 pub mod storage;
 pub mod tx;
 pub mod index;
+#[cfg(feature = "chess")]
 pub mod chess;
+#[cfg(feature = "chess")]
 pub mod aiwar;
 
 // ============================================================================
