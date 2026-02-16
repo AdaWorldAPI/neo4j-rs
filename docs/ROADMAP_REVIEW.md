@@ -819,7 +819,11 @@ The aiwar dataset is the **first real test case** for the wiring plan:
 **Recommendation R15**: Use aiwar_full.cypher as the acceptance test for
 LadybugBackend Phase 4. If the entire script can be loaded and queried through
 LadybugBackend producing the same results as MemoryBackend, the integration
-is validated.
+is validated. Additionally, use the aiwar dataset as **NARS calibration data**:
+the 356 relationships with labels and weights provide ground-truth evidence
+for initializing NARS frequency/confidence values. The multi-domain nature
+(AI warfare, geopolitics, technology) ensures the calibration is not
+domain-specific.
 
 ---
 
@@ -1215,6 +1219,8 @@ width is always 128 words (8192 bits, non-negotiable).
 | R22 | Handle `nan` property values in fingerprinting (skip, zero, or explicit) | aiwar `value: 'nan'` pattern | 2 hrs |
 | R23 | Prioritize `DataEnvelope` → `lb.*` step routing as first end-to-end integration test | Orchestration loop analysis | 3 days |
 | R24 | Document inner dialogue → hydration feedback loop as first-class architecture concept | Orchestration loop analysis | 4 hrs |
+| R25 | Position neo4j-rs as "100% openCypher + cognitive extensions" in README/docs | Competitive differentiation analysis | 2 hrs |
+| R26 | Add benchmark: Hamming popcount O(1) vs cosine float O(n) for same semantic content | Competitive differentiation analysis | 1 day |
 
 ### 16.2 Updated Priority Order
 
@@ -1244,7 +1250,11 @@ PHASE 4 (LadybugBackend):
   R19 HdrCascadeExec for vector_query()
   R20 Tiered access pattern
 
-ORCHESTRATION LOOP:
+DIFFERENTIATION:
+  R25 Position as "openCypher + cognitive extensions" in docs
+  R26 Hamming vs cosine benchmark
+
+ORCHESTRATION LOOP (endgame):
   R23 DataEnvelope → lb.* end-to-end integration test
   R24 Document inner dialogue → hydration feedback loop
 
@@ -1256,9 +1266,156 @@ STRATEGIC:
 
 ---
 
-## 17. Full Orchestration Loop — n8n → GEL → ladybug-rs → crewai-rs
+## 17. Immediate Priority — 100% openCypher + Competitive Differentiation
 
-### 17.1 The Runtime Topology
+### 17.1 openCypher First
+
+The orchestration loop (§18) is the endgame. The immediate priority is
+**100% openCypher compatibility** in neo4j-rs. Everything else builds on this:
+
+```
+Foundation: 100% openCypher (neo4j-rs Phase 1-2)
+    ↓
+Integration: LadybugBackend (Phase 4)
+    ↓
+Cognitive: ladybug.* procedures (wiring plan)
+    ↓
+Orchestration: n8n → GEL → crewai-rs loop (endgame)
+```
+
+This is why the roadmap's phase ordering is correct. Phase 1-2 (parser,
+executor, functions, MERGE, var-length paths) must be bulletproof before
+anything else matters. The TCK harness (R8) is the gatekeeper.
+
+### 17.2 Competitive Differentiation — Beyond RedisGraph/BlazingGraph
+
+RedisGraph (deprecated 2023) and BlazingGraph used **sparse matrix operations**
+for graph traversal and analytics. Their core primitive was SpGEMM (sparse
+general matrix-matrix multiply), which is O(n) in the number of non-zeros.
+
+Our approach is fundamentally different — **no O(n) in the hot path**:
+
+```
+RedisGraph / BlazingGraph:
+  Query → Sparse Matrix × Sparse Matrix → O(nnz) → Result
+  (SpGEMM, CSR/CSC, float operations, GPU optional)
+
+neo4j-rs + ladybug-rs:
+  Query → DN Tree O(1) navigate → Bitpacked Hamming popcount O(1)
+        → HDR Stacking → Std.Dev + Percentile (Belichtungsmesser)
+        → NARS truth-value update → Exact causality
+```
+
+The pipeline in detail:
+
+1. **DN Tree navigation — O(1)**: XOR/unbind to walk the concept hierarchy.
+   No index lookup, no hash table probe. The tree IS the address space.
+   Navigate to child/sibling/parent via bitwise operations on the
+   SpineCache. This replaces the adjacency matrix entirely for
+   hierarchical traversal.
+
+2. **Bitpacked Hamming popcount — O(1)**: Similarity between two entities
+   is `popcount(a XOR b)`. One CPU instruction per 64-bit word. For a
+   single 8192-bit container: 128 XOR + 128 popcount + 128 add = 384
+   instructions, all integer, all pipelined, no branch, no cache miss.
+   This replaces cosine/Jaccard on float vectors.
+
+3. **HDR Stacking — the Belichtungsmesser**: Like a camera's light meter
+   (Belichtungsmesser) automatically adjusting exposure, the HDR histogram
+   cascade stacks multiple resolution levels of the Hamming distance
+   distribution:
+
+   ```
+   L0: Scent check (1 word, ~2 cycles) — "is this even in the right neighborhood?"
+   L1: Popcount on prefix (2 words, ~8 cycles) — coarse distance estimate
+   L2: Sketch (fast approximate, ~32 cycles) — is it worth computing full distance?
+   L3: Full Hamming distance (~384 cycles) — exact distance within container
+   L4: Mexican hat wavelet — multi-scale resonance scoring
+   ```
+
+   The HDR histogram accumulates distances at each level, producing a
+   **standard deviation** and **percentile bands**. The "Belichtungsmesser"
+   analogy: just as a light meter finds the right exposure by sampling
+   across the dynamic range, the HDR cascade finds the right similarity
+   threshold by sampling across the distance distribution. Entities in the
+   top percentile band are "properly exposed" — neither over-matched
+   (too similar, trivial) nor under-matched (too distant, noise).
+
+4. **NARS truth-value update**: The HDR percentile results feed directly
+   into NARS (Non-Axiomatic Reasoning System) truth values. Each match
+   becomes a piece of evidence:
+
+   - **Frequency (f)**: What fraction of the evidence supports the
+     relationship? The HDR percentile maps to confidence in the match.
+   - **Confidence (c)**: How much total evidence do we have? Each
+     query-response cycle accumulates evidence.
+
+   The NARS update rule: `f_new = (f_old × c_old + f_evidence × c_evidence) / (c_old + c_evidence)`
+
+   This is stored in CogRecord C5 as Q16.16 fixed-point (no float).
+
+5. **Exact causality**: With NARS truth values accumulated over time,
+   the system can infer **causal relationships** — not just correlation
+   (A and B are similar) but causation (A causes B, with frequency f
+   and confidence c). The DN tree hierarchy provides the structural
+   context: if A is an ancestor of B in the concept tree, and the
+   NARS truth value for A→B is high, that's structural + evidential
+   support for causality. This is what NARS was designed for — reasoning
+   under uncertainty with exact truth-value algebra.
+
+### 17.3 Why This Beats Sparse Matrix Approaches
+
+| Aspect | RedisGraph/BlazingGraph | neo4j-rs + ladybug-rs |
+|--------|------------------------|----------------------|
+| Core operation | SpGEMM (sparse matrix multiply) | Hamming popcount (bitwise) |
+| Complexity per op | O(nnz) — scales with edge count | O(1) — fixed 384 instructions per container |
+| Float operations | Yes (float32/64 everywhere) | **Zero** (pure integer, no FPU) |
+| Similarity search | Cosine on float vectors | Hamming on bitpacked containers |
+| Causal inference | Not supported | NARS truth values + DN tree hierarchy |
+| Memory per node | Varies (sparse matrix row) | Fixed 8192 bits per container |
+| Cache behavior | Sparse access, many misses | Dense packed, predictable prefetch |
+| Hierarchy | Flat (matrix rows) | DN tree (O(1) navigate via XOR) |
+| Evidence accumulation | Not supported | NARS f/c update rule, Q16.16 |
+
+The key insight: **sparse matrices scale with the problem (O(n)), containers
+don't**. A container is always 8192 bits, whether the graph has 100 nodes
+or 100 million. The DN tree navigation is always O(1). The Hamming distance
+is always 384 instructions. The HDR cascade always produces percentile bands.
+The NARS update always produces a truth value. Nothing in the hot path
+scales with graph size.
+
+### 17.4 Implications for Phase 1-2
+
+This competitive advantage is **invisible at the openCypher level**. A user
+running `MATCH (a)-[:KNOWS]->(b) RETURN a, b` gets the same result whether
+the backend is MemoryBackend (naive), LadybugBackend (cognitive), or a
+hypothetical sparse matrix backend. The differentiation only manifests when:
+
+1. `CALL ladybug.search(fingerprint, k)` — resonance search, O(1) per candidate
+2. `CALL ladybug.causality(a, b)` — NARS truth value for A→B
+3. Variable-length path queries `MATCH (a)-[*1..5]->(b)` with fingerprint-
+   accelerated expansion (opt-in, wiring plan §3)
+4. Large-scale analytics where O(1) per-node beats O(nnz) per-matrix-op
+
+This is why 100% openCypher compatibility must come first: it's the universal
+interface that every user expects. The cognitive extensions are opt-in
+superpowers on top of a correct foundation.
+
+**Recommendation R25**: In the README and architecture docs, position neo4j-rs
+as "100% openCypher compatible" first, with "cognitive extensions via CALL
+procedures" as the differentiation. Never sacrifice openCypher correctness
+for cognitive features.
+
+**Recommendation R26**: Add a benchmark comparing Hamming popcount (384
+instructions, O(1)) vs cosine similarity on equivalent float32 vectors
+(~4096 FMAs, O(n)) for the same semantic content. This is the headline
+performance number for the differentiation story.
+
+---
+
+## 18. Full Orchestration Loop — n8n → GEL → ladybug-rs → crewai-rs (Endgame)
+
+### 18.1 The Runtime Topology
 
 The five codebases form a complete cognitive orchestration loop:
 
@@ -1314,7 +1471,7 @@ The five codebases form a complete cognitive orchestration loop:
 └──────────────────────────────────────┘
 ```
 
-### 17.2 The Orchestration Flow
+### 18.2 The Orchestration Flow
 
 The loop operates as follows:
 
@@ -1350,7 +1507,7 @@ The loop operates as follows:
    query, another crewai dialogue round, or external actions
    (notifications, API calls, database writes).
 
-### 17.3 How Each Codebase Contributes
+### 18.3 How Each Codebase Contributes
 
 | Codebase | Role in Loop | Key Primitive |
 |----------|-------------|---------------|
@@ -1360,7 +1517,7 @@ The loop operates as follows:
 | **crewai-rust** | Inner dialogue & agent fanout | `inner_loop.rs`, meta-agent orchestration |
 | **aiwar-neo4j-harvest** | Domain data & schema | 12-axis ontology, verb-as-property model |
 
-### 17.4 Contract Boundaries in the Loop
+### 18.4 Contract Boundaries in the Loop
 
 The loop is clean because each codebase has a well-defined contract boundary:
 
@@ -1378,7 +1535,7 @@ The loop is clean because each codebase has a well-defined contract boundary:
   Currently uses `neo4rs` (external driver); migration to neo4j-rs
   means same Cypher scripts, different backend.
 
-### 17.5 Implications for the Roadmap
+### 18.5 Implications for the Roadmap
 
 The orchestration loop confirms the Phase ordering is correct:
 
@@ -1404,7 +1561,7 @@ a first-class concept in the architecture docs.
 
 ---
 
-## 18. Conclusion (Updated)
+## 19. Conclusion (Updated)
 
 The ten documents together form a comprehensive, actively evolving plan. With
 the addition of the Wiring Plan, Composite Schema, GEL architecture, the
@@ -1441,12 +1598,20 @@ Phases 1-2. Wire the `DataEnvelope` → `lb.*` path early to validate the
 orchestration loop. Feed findings back into the CogRecord 256 design.
 Stability comes from exercising the contract, not from waiting for it to freeze.
 
-**Bottom line**: 10 documents, 5 codebases, 24 recommendations, 3 remaining
-gaps. The architecture is coherent, the contracts are clean at every boundary,
+**The competitive advantage**: Unlike RedisGraph/BlazingGraph (sparse matrix,
+O(nnz), float operations), our pipeline is O(1) per entity — DN tree
+navigation + bitpacked Hamming popcount + HDR percentile Belichtungsmesser +
+NARS truth-value accumulation → exact causality. Zero float operations in
+the hot path. This advantage is invisible at the openCypher level (same
+results) but transformative for cognitive extensions.
+
+**Bottom line**: 10 documents, 5 codebases, 26 recommendations, 3 remaining
+gaps. 100% openCypher compatibility is the immediate priority (Phase 1-2).
+The architecture is coherent, the contracts are clean at every boundary,
 the orchestration loop is well-defined (n8n triggers → GEL resonance →
 crewai-rs inner dialogue → fanout → hydrate back), and the first real
 dataset (aiwar — a general-purpose knowledge graph platform) is ready to
-serve as the integration test suite. Start building.
+serve as both the integration test suite and NARS calibration data. Start building.
 
 ---
 
