@@ -989,7 +989,41 @@ labels + properties, and the backend computes the initial fingerprint AND
 determines tree placement by finding the nearest parent via Hamming distance.
 The full container stack is built incrementally through hydration, not all at once.
 
-### 13.5 Implications for the Review
+### 13.5 Future: 3D Bitpacked Edge Markers — O(1) Rich Relationships
+
+A planned future extension: edges themselves become 3D bitpacked vectors
+(3 × 8192 = 24,576 bits), used as **edge markers** with O(1) lookup via popcount.
+
+```
+CURRENT: C1-C2 adjacency bitvectors (512 bits each)
+  → Binary: "edge exists" or "edge doesn't exist"
+  → O(1) existence check via single AND + popcount
+
+FUTURE: 3D bitpacked edge markers (3 × 8192 = 24,576 bits per edge)
+  → Rich: each edge carries 24,576 bits of information
+  → O(1) edge query via popcount on the 3D bitvector
+  → Edge similarity via Hamming across 3 axes
+  → Much richer relationships at O(1) cost
+```
+
+This transforms edges from binary presence/absence flags into
+content-addressable entities in their own right. Each edge is a point in
+a 3D bitpacked space — you can check existence, compute similarity, and
+query properties all through popcount and Hamming operations, without
+any index lookup or adjacency list traversal.
+
+**Impact on neo4j-rs**: The `get_relationships()` and `expand()` methods
+in LadybugBackend would benefit from this — instead of scanning adjacency
+lists, the backend checks the 3D edge marker with a single popcount
+operation. The `rel_type` filter becomes a Hamming distance check against
+the verb dimension of the edge marker. This is a major performance win
+for relationship-heavy queries like `MATCH (a)-[*1..5]->(b)`.
+
+**Impact on aiwar data**: The current aiwar relationship pattern (3 types
+with `r.label` + `r.weight` properties) would map naturally to 3D edge
+markers: one axis for type, one for label semantics, one for weight/strength.
+
+### 13.6 Implications for the Review
 
 This corrects several assumptions in the earlier sections:
 
