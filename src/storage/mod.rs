@@ -14,8 +14,9 @@
 pub mod memory;
 #[cfg(feature = "bolt")]
 pub mod bolt;
-#[cfg(feature = "ladybug")]
-pub mod ladybug;
+// DEPRECATED: moved to .deprecated/pr19_container_dto/
+// #[cfg(feature = "ladybug")]
+// pub mod ladybug; // → .deprecated/pr19_container_dto/ladybug_module/
 
 use async_trait::async_trait;
 use crate::model::*;
@@ -44,7 +45,7 @@ pub enum BackendConfig {
         database: Option<String>,
     },
 
-    /// ladybug-rs local storage
+    /// ladybug-rs local storage (DEPRECATED: module moved to .deprecated/)
     #[cfg(feature = "ladybug")]
     Ladybug {
         data_dir: std::path::PathBuf,
