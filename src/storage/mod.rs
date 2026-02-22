@@ -14,9 +14,11 @@
 pub mod memory;
 #[cfg(feature = "bolt")]
 pub mod bolt;
-// DEPRECATED: moved to .deprecated/pr19_container_dto/
+// DEPRECATED: ladybug module moved to .deprecated/pr19_container_dto/
 // #[cfg(feature = "ladybug")]
-// pub mod ladybug; // → .deprecated/pr19_container_dto/ladybug_module/
+// pub mod ladybug;
+#[cfg(feature = "ladybug-contract")]
+pub mod cogrecord;
 
 use async_trait::async_trait;
 use crate::model::*;
