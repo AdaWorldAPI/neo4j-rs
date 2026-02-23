@@ -8,7 +8,7 @@ license = "Apache-2.0"
 repository = "https://github.com/AdaWorldAPI/neo4j-rs"
 keywords = ["graph", "database", "cypher", "neo4j", "property-graph"]
 categories = ["database"]
-authors = ["Jan Hübener", "Ada Consciousness Project"]
+authors = ["AdaWorldAPI"]
 
 [lib]
 name = "neo4j_rs"

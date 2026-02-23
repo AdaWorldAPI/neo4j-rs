@@ -1363,7 +1363,7 @@ async fn dual_backend_match() {
     let ladybug = Graph::with_backend(
         LadybugBackend::open("./test_data").await?);
 
-    let cypher = "CREATE (a:Person {name: 'Ada'})-[:KNOWS]->(b:Person {name: 'Jan'})";
+    let cypher = "CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})";
     neo4j.mutate(cypher, []).await?;
     ladybug.mutate(cypher, []).await?;
 
@@ -1456,10 +1456,10 @@ async fn smoke_test_ladybug_backend() {
     let graph = Graph::open_ladybug(LadybugConfig::default()).await.unwrap();
 
     // CREATE
-    graph.mutate("CREATE (a:Person {name: 'Ada'})", []).await.unwrap();
-    graph.mutate("CREATE (b:Person {name: 'Jan'})", []).await.unwrap();
+    graph.mutate("CREATE (a:Person {name: 'Alice'})", []).await.unwrap();
+    graph.mutate("CREATE (b:Person {name: 'Bob'})", []).await.unwrap();
     graph.mutate(
-        "MATCH (a:Person {name: 'Ada'}), (b:Person {name: 'Jan'})
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
          CREATE (a)-[:KNOWS {since: 2025}]->(b)", []
     ).await.unwrap();
 
@@ -1468,21 +1468,21 @@ async fn smoke_test_ladybug_backend() {
         "MATCH (n:Person) RETURN n.name ORDER BY n.name", []
     ).await.unwrap();
     assert_eq!(result.rows.len(), 2);
-    assert_eq!(result.rows[0].get::<String>("n.name").unwrap(), "Ada");
+    assert_eq!(result.rows[0].get::<String>("n.name").unwrap(), "Alice");
 
     // TRAVERSE
     let result = graph.execute(
-        "MATCH (a:Person {name: 'Ada'})-[:KNOWS]->(b) RETURN b.name", []
+        "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b.name", []
     ).await.unwrap();
-    assert_eq!(result.rows[0].get::<String>("b.name").unwrap(), "Jan");
+    assert_eq!(result.rows[0].get::<String>("b.name").unwrap(), "Bob");
 
     // EXTENSION (ladybug-specific)
     let result = graph.execute(
-        "MATCH (n:Person {name: 'Ada'})
+        "MATCH (n:Person {name: 'Alice'})
          CALL ladybug.similar(n, 5) YIELD similar, score
          RETURN similar.name, score", []
     ).await.unwrap();
-    // Should find Jan (only other person node)
+    // Should find Bob (only other person node)
 }
 ```
 
