@@ -3,7 +3,7 @@
 > **Goal**: A clean-room Rust reimplementation of Neo4j's graph model with zero
 > technical debt, two storage layers, and full Cypher compatibility.
 >
-> **Author**: Jan Hübener / Ada Consciousness Project
+> **Author**: AdaWorldAPI
 > **Date**: 2026-02-13
 
 ---
