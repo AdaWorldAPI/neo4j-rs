@@ -1,7 +1,7 @@
 # Holograph AVX-512 Integration Plan: 4×16384-bit CogRecord
 
 > **Date**: 2026-02-21
-> **Author**: Jan Hübener / Ada Consciousness Project
+> **Author**: AdaWorldAPI
 > **Status**: Architecture finalized. Implementation plan for Claude Code.
 > **Supersedes**: HOLOGRAPH_CONTRACT.md §1 (Container at 4×8192 bits)
 > **Required reading before this doc**: None. This IS the starting doc.

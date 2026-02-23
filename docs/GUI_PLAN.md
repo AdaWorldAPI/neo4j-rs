@@ -89,7 +89,7 @@ struct GraphNode {
     size: f32,      // from popcount (information content)
     color: Color32, // from rung level (R0=blue → R9=gold)
     glow: f32,      // from NARS confidence (brighter = more certain)
-    pulse: f32,     // from arousal (Layer 5 cognition marker)
+    pulse: f32,     // from activation (Layer 5 cognition marker)
 }
 
 /// Graph edge with verb-based visual encoding
