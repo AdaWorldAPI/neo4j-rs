@@ -1,0 +1,14 @@
+[package]
+name = "neo4j-chess"
+version = "0.1.0"
+edition = "2021"
+description = "Chess procedures for neo4j-rs — isolates stonksfish + chess dependencies"
+
+[dependencies]
+# When stonksfish is available locally, uncomment:
+# stonksfish = { path = "../../../stonksfish" }
+chess = { version = "3.2.0", optional = true }
+
+[features]
+default = []
+engine = ["chess"]

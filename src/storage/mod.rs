@@ -459,4 +459,85 @@ pub trait StorageBackend: Send + Sync + 'static {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities::default()
     }
+
+    // ========================================================================
+    // Resonance-Aware Edge Operations (RI framework)
+    //
+    // These extend the graph with 3D causal perspectives via SPO containers.
+    // See docs/RESONANT_INTELLIGENCE.md for theory.
+    // See docs/EDGE_VECTOR_BUNDLE.md for integration plan.
+    //
+    // Default: not supported. LadybugBackend overrides with real SPO ops.
+    // ========================================================================
+
+    /// Create a relationship with SPO container perspective.
+    ///
+    /// The containers are computed by `superposition_decompose` on the
+    /// source and target node fingerprints, with the verb fingerprint
+    /// as the predicate container.
+    async fn create_resonance_edge(
+        &self,
+        _tx: &mut Self::Tx,
+        _src: NodeId,
+        _dst: NodeId,
+        _rel_type: &str,
+        _props: PropertyMap,
+    ) -> Result<crate::model::ResonanceEdge> {
+        Err(Error::ExecutionError("resonance edges not supported".into()))
+    }
+
+    /// Get a relationship with its full SPO containers loaded.
+    async fn get_resonance_edge(
+        &self,
+        _tx: &Self::Tx,
+        _id: RelId,
+    ) -> Result<Option<crate::model::ResonanceEdge>> {
+        Err(Error::ExecutionError("resonance edges not supported".into()))
+    }
+
+    /// Query edges by awareness state relative to a reference edge.
+    async fn resonance_query(
+        &self,
+        _tx: &Self::Tx,
+        _anchor: NodeId,
+        _reference: RelId,
+        _filter: crate::model::AwarenessFilter,
+    ) -> Result<Vec<(crate::model::ResonanceEdge, crate::model::AwarenessTensor)>> {
+        Err(Error::ExecutionError("resonance query not supported".into()))
+    }
+
+    /// Compute the causal path between two nodes.
+    ///
+    /// Finds shortest path and composes SPO awareness tensors along it
+    /// using the fiber bundle connection (sign=XOR, exp=ADD, mant=DEGRADE).
+    async fn causal_path(
+        &self,
+        _tx: &Self::Tx,
+        _src: NodeId,
+        _dst: NodeId,
+    ) -> Result<Option<crate::model::CausalPath>> {
+        Err(Error::ExecutionError("causal path not supported".into()))
+    }
+
+    /// Compute the perspective gestalt for a node.
+    ///
+    /// Gathers ALL edge awareness tensors and returns the dominant
+    /// awareness state + tensioned dimensions.
+    async fn perspective_gestalt(
+        &self,
+        _tx: &Self::Tx,
+        _node: NodeId,
+    ) -> Result<crate::model::PerspectiveGestalt> {
+        Err(Error::ExecutionError("perspective gestalt not supported".into()))
+    }
+
+    /// Compare two edges and return their 9-dimensional awareness tensor.
+    async fn edge_superposition(
+        &self,
+        _tx: &Self::Tx,
+        _edge_a: RelId,
+        _edge_b: RelId,
+    ) -> Result<crate::model::AwarenessTensor> {
+        Err(Error::ExecutionError("edge superposition not supported".into()))
+    }
 }
