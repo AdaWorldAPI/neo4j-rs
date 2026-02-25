@@ -29,4 +29,10 @@ pub use bf16_distance::{
     structured_bf16_distance, structured_bf16_distance_u16, spo_distance,
     qualia_to_bf16, bf16_to_qualia, qualia_vec_to_bf16, bf16_vec_to_qualia,
     W_SIGN, W_EXP, W_MANT, EXP_GATE, ELEMENTS_PER_CONTAINER, BIAS_OFFSET,
+    // Nib4: 4-bit per-dimension qualia encoding
+    Nib4Codebook, SpoNib4Distance,
+    nib4_distance, nib4_distance_packed, nib4_distance_normalized,
+    nib4_distance_bf16_aligned, nib4_pack_bf16, nib4_unpack_bf16,
+    nib4_to_hex, spo_nib4_distance,
+    NIB4_LEVELS, QUALIA_DIMS, QUALIA_BITS, QUALIA_WORDS, TOPOLOGY_BITS,
 };

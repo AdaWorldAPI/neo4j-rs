@@ -387,6 +387,256 @@ pub fn spo_distance(
 }
 
 // ============================================================================
+// NIB4 — 4-bit Nibble Encoding (the F:F approach)
+// ============================================================================
+//
+// Each qualia dimension → single hex nibble 0x0..0xF (0..15).
+// Distance = Manhattan (sum of abs_diff per dimension).
+//
+// Why this wins over BF16:
+// - BF16 needs 3-step cascade (sign → exp → mant with gating)
+// - Nib4 needs 1 step: abs_diff per nibble. Done.
+// - 17 dims × 4 bits = 68 bits. Leaves 16,316 bits for graph topology.
+// - Minimum separation ≥ 1 step = 1/15 of per-dim range.
+// - Per-dim quantization uses all 16 levels (vs 7 mantissa bits in BF16).
+//
+// Container layout:
+// ```text
+// [ 68 bits: 17 qualia nibbles ][ 16,316 bits: nodes/edges/NARS/SQL/GQL/... ]
+// ```
+
+/// Number of nibble levels (4 bits = 16 levels, 0..15).
+pub const NIB4_LEVELS: u8 = 15;
+
+/// Number of qualia dimensions in the standard taxonomy.
+pub const QUALIA_DIMS: usize = 17;
+
+/// Bits consumed by qualia nibbles in a container.
+pub const QUALIA_BITS: usize = QUALIA_DIMS * 4; // 68
+
+/// Bits remaining for graph topology in a 16,384-bit container.
+pub const TOPOLOGY_BITS: usize = 16_384 - QUALIA_BITS; // 16,316
+
+/// Per-dimension quantization bounds.
+/// Each dimension has its own [min, max] so all 16 levels are used.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Nib4Codebook {
+    /// (min, max) per dimension. Length = QUALIA_DIMS.
+    pub bounds: Vec<(f32, f32)>,
+}
+
+impl Nib4Codebook {
+    /// Build codebook from a corpus of float vectors.
+    /// Each vector must have length == QUALIA_DIMS.
+    pub fn from_corpus(vectors: &[&[f32]]) -> Self {
+        assert!(!vectors.is_empty(), "corpus must not be empty");
+        let ndims = vectors[0].len();
+        let mut bounds = Vec::with_capacity(ndims);
+
+        for d in 0..ndims {
+            let mut mn = f32::INFINITY;
+            let mut mx = f32::NEG_INFINITY;
+            for v in vectors {
+                let val = v[d];
+                if val < mn { mn = val; }
+                if val > mx { mx = val; }
+            }
+            // Tiny epsilon to avoid div-by-zero on constant dimensions
+            if (mx - mn).abs() < 1e-9 {
+                mx = mn + 1.0;
+            }
+            bounds.push((mn, mx));
+        }
+
+        Self { bounds }
+    }
+
+    /// Quantize a single float value for dimension `dim` → 0..15.
+    #[inline(always)]
+    pub fn encode_dim(&self, dim: usize, val: f32) -> u8 {
+        let (mn, mx) = self.bounds[dim];
+        let t = (val - mn) / (mx - mn); // 0.0..1.0
+        (t * NIB4_LEVELS as f32).round().clamp(0.0, NIB4_LEVELS as f32) as u8
+    }
+
+    /// Decode a nibble value back to float for dimension `dim`.
+    #[inline(always)]
+    pub fn decode_dim(&self, dim: usize, nib: u8) -> f32 {
+        let (mn, mx) = self.bounds[dim];
+        mn + (nib as f32 / NIB4_LEVELS as f32) * (mx - mn)
+    }
+
+    /// Encode a full float vector → nibble vector.
+    pub fn encode_vec(&self, vals: &[f32]) -> Vec<u8> {
+        vals.iter()
+            .enumerate()
+            .map(|(d, &v)| self.encode_dim(d, v))
+            .collect()
+    }
+
+    /// Decode a nibble vector back to floats.
+    pub fn decode_vec(&self, nibs: &[u8]) -> Vec<f32> {
+        nibs.iter()
+            .enumerate()
+            .map(|(d, &n)| self.decode_dim(d, n))
+            .collect()
+    }
+
+    /// Pack nibble vector into a compact u128 (68 bits for 17 dims).
+    /// Nibble 0 goes to bits 3..0, nibble 1 to bits 7..4, etc.
+    pub fn pack_u128(&self, nibs: &[u8]) -> u128 {
+        let mut packed: u128 = 0;
+        for (i, &n) in nibs.iter().enumerate() {
+            packed |= (n as u128 & 0xF) << (i * 4);
+        }
+        packed
+    }
+
+    /// Unpack u128 back to nibble vector.
+    pub fn unpack_u128(&self, packed: u128, ndims: usize) -> Vec<u8> {
+        (0..ndims)
+            .map(|i| ((packed >> (i * 4)) & 0xF) as u8)
+            .collect()
+    }
+}
+
+/// Manhattan distance between two nibble vectors.
+/// Sum of abs_diff per dimension. One operation per dim. That's it.
+#[inline]
+pub fn nib4_distance(a: &[u8], b: &[u8]) -> u32 {
+    debug_assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| x.abs_diff(y) as u32)
+        .sum()
+}
+
+/// Manhattan distance from packed u128 representations.
+#[inline]
+pub fn nib4_distance_packed(a: u128, b: u128, ndims: usize) -> u32 {
+    let mut dist = 0u32;
+    for i in 0..ndims {
+        let na = ((a >> (i * 4)) & 0xF) as u8;
+        let nb = ((b >> (i * 4)) & 0xF) as u8;
+        dist += na.abs_diff(nb) as u32;
+    }
+    dist
+}
+
+/// Normalized nibble distance in [0.0, 1.0].
+/// Normalized by F × ndims (max possible Manhattan distance).
+#[inline]
+pub fn nib4_distance_normalized(a: &[u8], b: &[u8]) -> f32 {
+    let raw = nib4_distance(a, b);
+    let max = NIB4_LEVELS as u32 * a.len() as u32; // F × ndims
+    raw as f32 / max as f32
+}
+
+/// Format a nibble vector as hex string "8:C:A:7:9:3:B:..."
+pub fn nib4_to_hex(nibs: &[u8]) -> String {
+    nibs.iter()
+        .map(|n| format!("{:X}", n & 0xF))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+// ============================================================================
+// BF16-aligned packing: 4 nibbles per u16 word
+// ============================================================================
+//
+// Container layout (1024 × u16 = BF16 format):
+//
+// ```text
+// word 0:  [ nib_3 | nib_2 | nib_1 | nib_0 ]   ← 4 qualia dims
+// word 1:  [ nib_7 | nib_6 | nib_5 | nib_4 ]   ← 4 qualia dims
+// word 2:  [ nib_11| nib_10| nib_9 | nib_8 ]   ← 4 qualia dims
+// word 3:  [ nib_15| nib_14| nib_13| nib_12]   ← 4 qualia dims
+// word 4:  [ 0000  | 0000  | 0000  | nib_16]   ← 1 qualia dim + 3 spare
+// word 5..1023: topology (nodes/edges/NARS/SQL/GQL/DNtree/Btree)
+// ```
+//
+// This aligns exactly with BF16: same u16 word size, same container layout.
+// The Hamming hardware sees no difference — just u16 words.
+
+/// Number of u16 words needed for qualia nibbles.
+pub const QUALIA_WORDS: usize = (QUALIA_DIMS + 3) / 4; // ceil(17/4) = 5
+
+/// Pack nibble vector into BF16-aligned u16 words.
+/// Returns a Vec<u16> of length QUALIA_WORDS (5 for 17 dims).
+pub fn nib4_pack_bf16(nibs: &[u8]) -> Vec<u16> {
+    let nwords = (nibs.len() + 3) / 4;
+    let mut words = vec![0u16; nwords];
+    for (i, &n) in nibs.iter().enumerate() {
+        let word_idx = i / 4;
+        let nib_pos = i % 4;
+        words[word_idx] |= ((n & 0xF) as u16) << (nib_pos * 4);
+    }
+    words
+}
+
+/// Unpack BF16-aligned u16 words back to nibble vector.
+pub fn nib4_unpack_bf16(words: &[u16], ndims: usize) -> Vec<u8> {
+    (0..ndims)
+        .map(|i| {
+            let word_idx = i / 4;
+            let nib_pos = i % 4;
+            ((words[word_idx] >> (nib_pos * 4)) & 0xF) as u8
+        })
+        .collect()
+}
+
+/// Manhattan distance directly on BF16-aligned packed u16 words.
+/// Operates on the qualia portion only (first QUALIA_WORDS words).
+pub fn nib4_distance_bf16_aligned(a: &[u16], b: &[u16], ndims: usize) -> u32 {
+    let nwords = (ndims + 3) / 4;
+    let mut dist = 0u32;
+    for w in 0..nwords {
+        let wa = a[w];
+        let wb = b[w];
+        // Process 4 nibbles per word
+        let nibs_in_word = if w == nwords - 1 { ((ndims - 1) % 4) + 1 } else { 4 };
+        for p in 0..nibs_in_word {
+            let na = ((wa >> (p * 4)) & 0xF) as u8;
+            let nb = ((wb >> (p * 4)) & 0xF) as u8;
+            dist += na.abs_diff(nb) as u32;
+        }
+    }
+    dist
+}
+
+/// SPO nibble distance — compare S, P, O qualia vectors.
+#[derive(Debug, Clone)]
+pub struct SpoNib4Distance {
+    pub subject: u32,
+    pub predicate: u32,
+    pub object: u32,
+}
+
+impl SpoNib4Distance {
+    pub fn total(&self) -> u32 {
+        self.subject + self.predicate + self.object
+    }
+
+    pub fn normalized(&self, ndims: usize) -> f32 {
+        let max = 3 * NIB4_LEVELS as u32 * ndims as u32;
+        self.total() as f32 / max as f32
+    }
+}
+
+/// Compare two edges across S, P, O nibble vectors.
+pub fn spo_nib4_distance(
+    s_a: &[u8], s_b: &[u8],
+    p_a: &[u8], p_b: &[u8],
+    o_a: &[u8], o_b: &[u8],
+) -> SpoNib4Distance {
+    SpoNib4Distance {
+        subject: nib4_distance(s_a, s_b),
+        predicate: nib4_distance(p_a, p_b),
+        object: nib4_distance(o_a, o_b),
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -617,5 +867,121 @@ mod tests {
         assert!(d.normalized() <= 1.0);
         assert!(d.similarity() >= 0.0);
         assert!(d.similarity() < 1.0);
+    }
+
+    // ====================================================================
+    // Nib4 tests
+    // ====================================================================
+
+    #[test]
+    fn nib4_identical_zero_distance() {
+        let a = vec![7u8; 17];
+        assert_eq!(nib4_distance(&a, &a), 0);
+    }
+
+    #[test]
+    fn nib4_max_distance_is_ff() {
+        // 17 dims × 15 max abs_diff = 255 = 0xFF
+        let a = vec![0u8; 17];
+        let b = vec![15u8; 17];
+        assert_eq!(nib4_distance(&a, &b), 255); // 0xFF
+    }
+
+    #[test]
+    fn nib4_manhattan_abs_diff() {
+        let a = vec![3, 10, 7, 0, 15, 5, 8, 12, 1, 14, 6, 9, 2, 11, 4, 13, 7];
+        let b = vec![5, 8, 7, 3, 12, 5, 10, 9, 4, 11, 6, 6, 5, 8, 7, 10, 7];
+        let expected: u32 = a.iter().zip(&b).map(|(x, y): (&u8, &u8)| x.abs_diff(*y) as u32).sum();
+        assert_eq!(nib4_distance(&a, &b), expected);
+    }
+
+    #[test]
+    fn nib4_packed_matches_unpacked() {
+        let codebook = Nib4Codebook {
+            bounds: vec![(0.0, 1.0); 17],
+        };
+        let a = vec![3, 10, 7, 0, 15, 5, 8, 12, 1, 14, 6, 9, 2, 11, 4, 13, 7];
+        let b = vec![5, 8, 7, 3, 12, 5, 10, 9, 4, 11, 6, 6, 5, 8, 7, 10, 7];
+        let pa = codebook.pack_u128(&a);
+        let pb = codebook.pack_u128(&b);
+        assert_eq!(nib4_distance(&a, &b), nib4_distance_packed(pa, pb, 17));
+    }
+
+    #[test]
+    fn nib4_codebook_roundtrip() {
+        let codebook = Nib4Codebook {
+            bounds: vec![(-0.4, 1.0); 17],
+        };
+        for val in [-0.4f32, -0.2, 0.0, 0.25, 0.5, 0.75, 1.0] {
+            let nib = codebook.encode_dim(0, val);
+            let decoded = codebook.decode_dim(0, nib);
+            assert!((val - decoded).abs() < 0.05,
+                "roundtrip {val} → {nib} → {decoded}, err={}", (val - decoded).abs());
+        }
+    }
+
+    #[test]
+    fn nib4_hex_format() {
+        let nibs = vec![0xA, 0x5, 0xF, 0x0, 0x7];
+        assert_eq!(nib4_to_hex(&nibs), "A:5:F:0:7");
+    }
+
+    #[test]
+    fn nib4_normalized_bounds() {
+        let a = vec![0u8; 17];
+        let b = vec![15u8; 17];
+        let norm = nib4_distance_normalized(&a, &b);
+        assert!((norm - 1.0).abs() < f32::EPSILON, "max distance should normalize to 1.0");
+
+        let norm_zero = nib4_distance_normalized(&a, &a);
+        assert!((norm_zero).abs() < f32::EPSILON, "identical should normalize to 0.0");
+    }
+
+    #[test]
+    fn nib4_17_dims_times_f_equals_ff() {
+        // The elegant property: 17 × F = FF (17 × 15 = 255)
+        assert_eq!(QUALIA_DIMS as u32 * NIB4_LEVELS as u32, 0xFF);
+    }
+
+    #[test]
+    fn nib4_bf16_aligned_packing() {
+        let nibs = vec![0xA, 0x5, 0xF, 0x0, 0x7, 0x3, 0xB, 0x8,
+                        0x1, 0xE, 0x6, 0x9, 0x2, 0xD, 0x4, 0xC, 0x7];
+        assert_eq!(nibs.len(), 17); // QUALIA_DIMS
+
+        let packed = nib4_pack_bf16(&nibs);
+        assert_eq!(packed.len(), 5); // QUALIA_WORDS = ceil(17/4) = 5
+
+        // First word: nibbles 0-3 → 0xA, 0x5, 0xF, 0x0 → 0x0F5A
+        assert_eq!(packed[0], 0x0F5A);
+
+        // Roundtrip
+        let unpacked = nib4_unpack_bf16(&packed, 17);
+        assert_eq!(unpacked, nibs);
+    }
+
+    #[test]
+    fn nib4_bf16_aligned_distance_matches_unpacked() {
+        let a = vec![0xA, 0x5, 0xF, 0x0, 0x7, 0x3, 0xB, 0x8,
+                     0x1, 0xE, 0x6, 0x9, 0x2, 0xD, 0x4, 0xC, 0x7];
+        let b = vec![0x3, 0x8, 0xC, 0x2, 0x5, 0x6, 0x9, 0xA,
+                     0x4, 0xB, 0x3, 0x6, 0x5, 0xA, 0x7, 0x9, 0x4];
+
+        let d_unpacked = nib4_distance(&a, &b);
+
+        let pa = nib4_pack_bf16(&a);
+        let pb = nib4_pack_bf16(&b);
+        let d_packed = nib4_distance_bf16_aligned(&pa, &pb, 17);
+
+        assert_eq!(d_unpacked, d_packed,
+            "BF16-aligned distance must match unpacked distance");
+    }
+
+    #[test]
+    fn nib4_qualia_fits_in_5_bf16_words() {
+        // 17 dims × 4 bits = 68 bits → 5 × u16 (80 bits, 12 spare)
+        assert_eq!(QUALIA_WORDS, 5);
+        // That leaves 1019 words for topology
+        assert_eq!(ELEMENTS_PER_CONTAINER - QUALIA_WORDS, 1019);
     }
 }
