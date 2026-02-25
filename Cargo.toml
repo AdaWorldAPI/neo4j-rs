@@ -2,7 +2,7 @@
 name = "neo4j-rs"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.93"
 description = "Clean Rust reimplementation of Neo4j — property graph database with full Cypher support"
 license = "Apache-2.0"
 repository = "https://github.com/AdaWorldAPI/neo4j-rs"
