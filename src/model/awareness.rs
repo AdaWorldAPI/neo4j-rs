@@ -30,7 +30,7 @@
 //! See `docs/THEORETICAL_FOUNDATIONS.md` for the causal proof stack.
 
 use serde::{Deserialize, Serialize};
-use super::{Path, RelId};
+use super::Path;
 
 // ============================================================================
 // Awareness State (the gestalt classification)

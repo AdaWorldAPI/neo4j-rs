@@ -12,6 +12,7 @@ pub mod path;
 pub mod value;
 pub mod property_map;
 pub mod awareness;
+pub mod bf16_distance;
 
 pub use node::{Node, NodeId};
 pub use relationship::{Relationship, RelId, Direction};
@@ -22,4 +23,10 @@ pub use awareness::{
     AwarenessState, AwarenessTensor, AwarenessMask, AwarenessFilter,
     CausalDirection, CausalPath, PerspectiveGestalt,
     ResonanceEdge, ContainerRef, SpoSlot,
+};
+pub use bf16_distance::{
+    Bf16Distance, LayerCounts, SpoDistance,
+    structured_bf16_distance, structured_bf16_distance_u16, spo_distance,
+    qualia_to_bf16, bf16_to_qualia, qualia_vec_to_bf16, bf16_vec_to_qualia,
+    W_SIGN, W_EXP, W_MANT, EXP_GATE, ELEMENTS_PER_CONTAINER, BIAS_OFFSET,
 };

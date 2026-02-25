@@ -19,8 +19,8 @@ bolt = ["dep:tokio", "dep:bytes"]              # Neo4j Bolt protocol client
 ladybug = ["dep:ladybug", "dep:tokio"]         # ladybug-rs storage backend
 ladybug-contract = ["dep:ladybug-contract"]    # CogRecord8K types for Hamming-accelerated queries
 arrow-results = ["dep:arrow"]                   # Stream results as Arrow RecordBatch
-chess = ["dep:stonksfish", "dep:chess"]         # Chess procedures (stonksfish + chess crate)
-full = ["bolt", "ladybug", "arrow-results", "chess"]
+chess = ["dep:neo4j-chess"]                      # Chess procedures (isolated in crate)
+full = ["bolt", "ladybug", "arrow-results"]     # chess excluded — opt-in only
 
 [dependencies]
 # === Core (always present) ===
@@ -42,9 +42,8 @@ bytes = { version = "1.11", optional = true }
 ladybug = { path = "../ladybug-rs", optional = true }
 ladybug-contract = { path = "../ladybug-rs/crates/ladybug-contract", optional = true }
 
-# === Optional: Chess stack (stonksfish engine + chess crate) ===
-stonksfish = { path = "../stonksfish", optional = true }
-chess = { version = "3.2.0", optional = true }
+# === Optional: Chess (isolated in crate — no stonksfish path dep on main build) ===
+neo4j-chess = { path = "crates/neo4j-chess", optional = true }
 
 # === Optional: Arrow result streaming ===
 arrow = { version = "57", optional = true, features = ["ffi"] }
