@@ -1,5 +1,18 @@
 # CLAUDE.md — neo4j-rs Development Guide
 
+## Role in the Four-Level Architecture
+
+neo4j-rs is **Level 3 — Reasoning** (structural reasoning).
+
+> **Canonical cross-repo architecture:** [ada-docs/architecture/FOUR_LEVEL_ARCHITECTURE.md](https://github.com/AdaWorldAPI/ada-docs/blob/main/architecture/FOUR_LEVEL_ARCHITECTURE.md)
+
+neo4j-rs owns graph reasoning: nodes + edges with NARS truth values `⟨f, c⟩`,
+9D awareness tensors (BF16 sign/exp/mantissa × SPO), CausalPath with fiber-bundle
+transport, and the StorageBackend trait. Reasoning IS the graph structure —
+edges carry logical relationships, not just connectivity.
+
+---
+
 ## Project Identity
 
 **neo4j-rs** is a clean-room Rust reimplementation of Neo4j's property graph
