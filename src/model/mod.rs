@@ -32,7 +32,9 @@ pub use bf16_distance::{
     // Nib4: 4-bit per-dimension qualia encoding
     Nib4Codebook, SpoNib4Distance,
     nib4_distance, nib4_distance_packed, nib4_distance_normalized,
-    nib4_distance_bf16_aligned, nib4_pack_bf16, nib4_unpack_bf16,
+    nib4_distance_bf16_aligned, nib4_full_distance, nib4_brightness_differs,
+    nib4_pack_bf16, nib4_unpack_bf16,
     nib4_to_hex, spo_nib4_distance,
-    NIB4_LEVELS, QUALIA_DIMS, QUALIA_BITS, QUALIA_WORDS, TOPOLOGY_BITS,
+    NIB4_LEVELS, QUALIA_DIMS, QUALIA_DIM_NAMES, QUALIA_BITS, QUALIA_WORDS,
+    BRIGHTNESS_WORD, BRIGHTNESS_BIT, TOPOLOGY_BITS,
 };

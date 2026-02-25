@@ -408,14 +408,23 @@ pub fn spo_distance(
 /// Number of nibble levels (4 bits = 16 levels, 0..15).
 pub const NIB4_LEVELS: u8 = 15;
 
-/// Number of qualia dimensions in the standard taxonomy.
-pub const QUALIA_DIMS: usize = 17;
+/// Number of qualia dimensions encoded as nibbles (16, not 17).
+/// The 17th dimension (resolution_hunger) is excluded and encoded as
+/// a 1-bit brightness/causality flag at the BF16 sign bit position.
+pub const QUALIA_DIMS: usize = 16;
 
-/// Bits consumed by qualia nibbles in a container.
-pub const QUALIA_BITS: usize = QUALIA_DIMS * 4; // 68
+/// The 16 nibble dimensions (canonical order).
+pub const QUALIA_DIM_NAMES: &[&str] = &[
+    "valence", "arousal", "dominance", "warmth", "brightness",
+    "tension", "clarity", "social", "nostalgia", "sacredness",
+    "desire", "grief", "awe", "shame", "hope", "edge",
+];
+
+/// Total qualia bits: 16 nibbles + 1 brightness bit = 65 bits.
+pub const QUALIA_BITS: usize = QUALIA_DIMS * 4 + 1; // 65
 
 /// Bits remaining for graph topology in a 16,384-bit container.
-pub const TOPOLOGY_BITS: usize = 16_384 - QUALIA_BITS; // 16,316
+pub const TOPOLOGY_BITS: usize = 16_384 - QUALIA_BITS; // 16,319
 
 /// Per-dimension quantization bounds.
 /// Each dimension has its own [min, max] so all 16 levels are used.
@@ -541,65 +550,91 @@ pub fn nib4_to_hex(nibs: &[u8]) -> String {
 }
 
 // ============================================================================
-// BF16-aligned packing: 4 nibbles per u16 word
+// BF16-aligned packing: 16 dims + 1-bit brightness
 // ============================================================================
 //
 // Container layout (1024 × u16 = BF16 format):
 //
 // ```text
-// word 0:  [ nib_3 | nib_2 | nib_1 | nib_0 ]   ← 4 qualia dims
-// word 1:  [ nib_7 | nib_6 | nib_5 | nib_4 ]   ← 4 qualia dims
-// word 2:  [ nib_11| nib_10| nib_9 | nib_8 ]   ← 4 qualia dims
-// word 3:  [ nib_15| nib_14| nib_13| nib_12]   ← 4 qualia dims
-// word 4:  [ 0000  | 0000  | 0000  | nib_16]   ← 1 qualia dim + 3 spare
+// word 0:  [ nib_3 | nib_2 | nib_1 | nib_0 ]   ← valence, arousal, dominance, warmth
+// word 1:  [ nib_7 | nib_6 | nib_5 | nib_4 ]   ← brightness, tension, clarity, social
+// word 2:  [ nib_11| nib_10| nib_9 | nib_8 ]   ← nostalgia, sacredness, desire, grief
+// word 3:  [ nib_15| nib_14| nib_13| nib_12]   ← awe, shame, hope, edge
+// word 4:  [ B | 000...0000000000000 ]           ← bit 15 = brightness/causality (the +1)
 // word 5..1023: topology (nodes/edges/NARS/SQL/GQL/DNtree/Btree)
 // ```
 //
-// This aligns exactly with BF16: same u16 word size, same container layout.
-// The Hamming hardware sees no difference — just u16 words.
+// 16 dims × 4 bits = 64 bits = exactly 4 u16 words. Zero waste.
+// The +1 (resolution_hunger → brightness bit) sits at BF16 sign position in word 4.
+// That way BF16 sign-comparison hardware treats it as direction/causality.
 
-/// Number of u16 words needed for qualia nibbles.
-pub const QUALIA_WORDS: usize = (QUALIA_DIMS + 3) / 4; // ceil(17/4) = 5
+/// Number of u16 words for qualia nibbles (16 dims / 4 = 4 words).
+pub const QUALIA_WORDS: usize = QUALIA_DIMS / 4; // 16/4 = 4
 
-/// Pack nibble vector into BF16-aligned u16 words.
-/// Returns a Vec<u16> of length QUALIA_WORDS (5 for 17 dims).
-pub fn nib4_pack_bf16(nibs: &[u8]) -> Vec<u16> {
-    let nwords = (nibs.len() + 3) / 4;
-    let mut words = vec![0u16; nwords];
+/// Word index where the brightness/causality bit lives.
+pub const BRIGHTNESS_WORD: usize = QUALIA_WORDS; // word 4
+
+/// Bit position of the brightness flag within its word (BF16 sign bit).
+pub const BRIGHTNESS_BIT: u16 = 0x8000; // bit 15
+
+/// Pack 16 nibble dims + 1 brightness bit into BF16-aligned u16 words.
+/// Returns 5 u16 words: [4 words × 4 nibbles] + [brightness bit in word 4 sign position].
+pub fn nib4_pack_bf16(nibs: &[u8], brightness: bool) -> Vec<u16> {
+    debug_assert!(nibs.len() <= 16, "max 16 nibble dims for BF16 alignment");
+    let mut words = vec![0u16; QUALIA_WORDS + 1]; // 5 words
     for (i, &n) in nibs.iter().enumerate() {
         let word_idx = i / 4;
         let nib_pos = i % 4;
         words[word_idx] |= ((n & 0xF) as u16) << (nib_pos * 4);
     }
+    // Brightness bit at BF16 sign position of word 4
+    if brightness {
+        words[BRIGHTNESS_WORD] |= BRIGHTNESS_BIT;
+    }
     words
 }
 
-/// Unpack BF16-aligned u16 words back to nibble vector.
-pub fn nib4_unpack_bf16(words: &[u16], ndims: usize) -> Vec<u8> {
-    (0..ndims)
+/// Unpack BF16-aligned u16 words back to 16 nibbles + brightness bit.
+pub fn nib4_unpack_bf16(words: &[u16]) -> (Vec<u8>, bool) {
+    let nibs = (0..QUALIA_DIMS)
         .map(|i| {
             let word_idx = i / 4;
             let nib_pos = i % 4;
             ((words[word_idx] >> (nib_pos * 4)) & 0xF) as u8
         })
-        .collect()
+        .collect();
+    let brightness = (words[BRIGHTNESS_WORD] & BRIGHTNESS_BIT) != 0;
+    (nibs, brightness)
 }
 
-/// Manhattan distance directly on BF16-aligned packed u16 words.
-/// Operates on the qualia portion only (first QUALIA_WORDS words).
-pub fn nib4_distance_bf16_aligned(a: &[u16], b: &[u16], ndims: usize) -> u32 {
-    let nwords = (ndims + 3) / 4;
+/// Manhattan distance on BF16-aligned packed u16 words (16 nibble dims).
+/// Does NOT include brightness bit — that's a separate binary comparison.
+pub fn nib4_distance_bf16_aligned(a: &[u16], b: &[u16]) -> u32 {
     let mut dist = 0u32;
-    for w in 0..nwords {
+    for w in 0..QUALIA_WORDS {
         let wa = a[w];
         let wb = b[w];
-        // Process 4 nibbles per word
-        let nibs_in_word = if w == nwords - 1 { ((ndims - 1) % 4) + 1 } else { 4 };
-        for p in 0..nibs_in_word {
+        // 4 nibbles per word, all 4 populated in each of the 4 words
+        for p in 0..4 {
             let na = ((wa >> (p * 4)) & 0xF) as u8;
             let nb = ((wb >> (p * 4)) & 0xF) as u8;
             dist += na.abs_diff(nb) as u32;
         }
+    }
+    dist
+}
+
+/// Check if brightness/causality bits differ between two containers.
+pub fn nib4_brightness_differs(a: &[u16], b: &[u16]) -> bool {
+    (a[BRIGHTNESS_WORD] ^ b[BRIGHTNESS_WORD]) & BRIGHTNESS_BIT != 0
+}
+
+/// Full distance: 16-dim Manhattan + brightness penalty.
+/// Brightness mismatch adds a configurable penalty (default: 16 = one full dimension).
+pub fn nib4_full_distance(a: &[u16], b: &[u16], brightness_penalty: u32) -> u32 {
+    let mut dist = nib4_distance_bf16_aligned(a, b);
+    if nib4_brightness_differs(a, b) {
+        dist += brightness_penalty;
     }
     dist
 }
@@ -870,27 +905,27 @@ mod tests {
     }
 
     // ====================================================================
-    // Nib4 tests
+    // Nib4 tests (16 dims + 1-bit brightness)
     // ====================================================================
 
     #[test]
     fn nib4_identical_zero_distance() {
-        let a = vec![7u8; 17];
+        let a = vec![7u8; 16]; // 16 dims
         assert_eq!(nib4_distance(&a, &a), 0);
     }
 
     #[test]
-    fn nib4_max_distance_is_ff() {
-        // 17 dims × 15 max abs_diff = 255 = 0xFF
-        let a = vec![0u8; 17];
-        let b = vec![15u8; 17];
-        assert_eq!(nib4_distance(&a, &b), 255); // 0xFF
+    fn nib4_max_distance_is_f0() {
+        // 16 dims × 15 max abs_diff = 240 = 0xF0
+        let a = vec![0u8; 16];
+        let b = vec![15u8; 16];
+        assert_eq!(nib4_distance(&a, &b), 240); // 0xF0
     }
 
     #[test]
     fn nib4_manhattan_abs_diff() {
-        let a = vec![3, 10, 7, 0, 15, 5, 8, 12, 1, 14, 6, 9, 2, 11, 4, 13, 7];
-        let b = vec![5, 8, 7, 3, 12, 5, 10, 9, 4, 11, 6, 6, 5, 8, 7, 10, 7];
+        let a = vec![3, 10, 7, 0, 15, 5, 8, 12, 1, 14, 6, 9, 2, 11, 4, 13];
+        let b = vec![5, 8, 7, 3, 12, 5, 10, 9, 4, 11, 6, 6, 5, 8, 7, 10];
         let expected: u32 = a.iter().zip(&b).map(|(x, y): (&u8, &u8)| x.abs_diff(*y) as u32).sum();
         assert_eq!(nib4_distance(&a, &b), expected);
     }
@@ -898,19 +933,19 @@ mod tests {
     #[test]
     fn nib4_packed_matches_unpacked() {
         let codebook = Nib4Codebook {
-            bounds: vec![(0.0, 1.0); 17],
+            bounds: vec![(0.0, 1.0); 16],
         };
-        let a = vec![3, 10, 7, 0, 15, 5, 8, 12, 1, 14, 6, 9, 2, 11, 4, 13, 7];
-        let b = vec![5, 8, 7, 3, 12, 5, 10, 9, 4, 11, 6, 6, 5, 8, 7, 10, 7];
+        let a = vec![3, 10, 7, 0, 15, 5, 8, 12, 1, 14, 6, 9, 2, 11, 4, 13];
+        let b = vec![5, 8, 7, 3, 12, 5, 10, 9, 4, 11, 6, 6, 5, 8, 7, 10];
         let pa = codebook.pack_u128(&a);
         let pb = codebook.pack_u128(&b);
-        assert_eq!(nib4_distance(&a, &b), nib4_distance_packed(pa, pb, 17));
+        assert_eq!(nib4_distance(&a, &b), nib4_distance_packed(pa, pb, 16));
     }
 
     #[test]
     fn nib4_codebook_roundtrip() {
         let codebook = Nib4Codebook {
-            bounds: vec![(-0.4, 1.0); 17],
+            bounds: vec![(-0.4, 1.0); 16],
         };
         for val in [-0.4f32, -0.2, 0.0, 0.25, 0.5, 0.75, 1.0] {
             let nib = codebook.encode_dim(0, val);
@@ -928,8 +963,8 @@ mod tests {
 
     #[test]
     fn nib4_normalized_bounds() {
-        let a = vec![0u8; 17];
-        let b = vec![15u8; 17];
+        let a = vec![0u8; 16];
+        let b = vec![15u8; 16];
         let norm = nib4_distance_normalized(&a, &b);
         assert!((norm - 1.0).abs() < f32::EPSILON, "max distance should normalize to 1.0");
 
@@ -938,50 +973,89 @@ mod tests {
     }
 
     #[test]
-    fn nib4_17_dims_times_f_equals_ff() {
-        // The elegant property: 17 × F = FF (17 × 15 = 255)
-        assert_eq!(QUALIA_DIMS as u32 * NIB4_LEVELS as u32, 0xFF);
+    fn nib4_16_dims_exact_bf16_alignment() {
+        // 16 × 4 bits = 64 bits = exactly 4 × u16. Zero waste.
+        assert_eq!(QUALIA_DIMS, 16);
+        assert_eq!(QUALIA_WORDS, 4);  // 16/4 = 4 u16 words
+        assert_eq!(QUALIA_DIMS * 4, 64); // exactly 64 bits
     }
 
     #[test]
-    fn nib4_bf16_aligned_packing() {
+    fn nib4_bf16_aligned_packing_with_brightness() {
         let nibs = vec![0xA, 0x5, 0xF, 0x0, 0x7, 0x3, 0xB, 0x8,
-                        0x1, 0xE, 0x6, 0x9, 0x2, 0xD, 0x4, 0xC, 0x7];
-        assert_eq!(nibs.len(), 17); // QUALIA_DIMS
+                        0x1, 0xE, 0x6, 0x9, 0x2, 0xD, 0x4, 0xC];
+        assert_eq!(nibs.len(), 16);
 
-        let packed = nib4_pack_bf16(&nibs);
-        assert_eq!(packed.len(), 5); // QUALIA_WORDS = ceil(17/4) = 5
+        // Pack with brightness = true
+        let packed = nib4_pack_bf16(&nibs, true);
+        assert_eq!(packed.len(), 5); // 4 words nibbles + 1 word brightness
 
         // First word: nibbles 0-3 → 0xA, 0x5, 0xF, 0x0 → 0x0F5A
         assert_eq!(packed[0], 0x0F5A);
 
+        // Brightness word (4) has sign bit set
+        assert_eq!(packed[BRIGHTNESS_WORD] & BRIGHTNESS_BIT, BRIGHTNESS_BIT);
+
         // Roundtrip
-        let unpacked = nib4_unpack_bf16(&packed, 17);
+        let (unpacked, bright) = nib4_unpack_bf16(&packed);
         assert_eq!(unpacked, nibs);
+        assert!(bright);
+
+        // Pack with brightness = false
+        let packed_no = nib4_pack_bf16(&nibs, false);
+        let (_, bright_no) = nib4_unpack_bf16(&packed_no);
+        assert!(!bright_no);
     }
 
     #[test]
     fn nib4_bf16_aligned_distance_matches_unpacked() {
         let a = vec![0xA, 0x5, 0xF, 0x0, 0x7, 0x3, 0xB, 0x8,
-                     0x1, 0xE, 0x6, 0x9, 0x2, 0xD, 0x4, 0xC, 0x7];
+                     0x1, 0xE, 0x6, 0x9, 0x2, 0xD, 0x4, 0xC];
         let b = vec![0x3, 0x8, 0xC, 0x2, 0x5, 0x6, 0x9, 0xA,
-                     0x4, 0xB, 0x3, 0x6, 0x5, 0xA, 0x7, 0x9, 0x4];
+                     0x4, 0xB, 0x3, 0x6, 0x5, 0xA, 0x7, 0x9];
 
         let d_unpacked = nib4_distance(&a, &b);
 
-        let pa = nib4_pack_bf16(&a);
-        let pb = nib4_pack_bf16(&b);
-        let d_packed = nib4_distance_bf16_aligned(&pa, &pb, 17);
+        let pa = nib4_pack_bf16(&a, false);
+        let pb = nib4_pack_bf16(&b, false);
+        let d_packed = nib4_distance_bf16_aligned(&pa, &pb);
 
         assert_eq!(d_unpacked, d_packed,
             "BF16-aligned distance must match unpacked distance");
     }
 
     #[test]
-    fn nib4_qualia_fits_in_5_bf16_words() {
-        // 17 dims × 4 bits = 68 bits → 5 × u16 (80 bits, 12 spare)
-        assert_eq!(QUALIA_WORDS, 5);
-        // That leaves 1019 words for topology
-        assert_eq!(ELEMENTS_PER_CONTAINER - QUALIA_WORDS, 1019);
+    fn nib4_brightness_bit_detection() {
+        let a = nib4_pack_bf16(&vec![0u8; 16], true);
+        let b = nib4_pack_bf16(&vec![0u8; 16], false);
+
+        assert!(nib4_brightness_differs(&a, &b));
+        assert!(!nib4_brightness_differs(&a, &a));
+        assert!(!nib4_brightness_differs(&b, &b));
+    }
+
+    #[test]
+    fn nib4_full_distance_includes_brightness() {
+        let a_nibs = vec![5u8; 16];
+        let b_nibs = vec![5u8; 16]; // identical nibbles
+
+        // Same brightness → distance 0
+        let a = nib4_pack_bf16(&a_nibs, true);
+        let b = nib4_pack_bf16(&b_nibs, true);
+        assert_eq!(nib4_full_distance(&a, &b, 16), 0);
+
+        // Different brightness → distance = penalty
+        let c = nib4_pack_bf16(&b_nibs, false);
+        assert_eq!(nib4_full_distance(&a, &c, 16), 16);
+    }
+
+    #[test]
+    fn nib4_qualia_fits_in_4_bf16_words_plus_brightness() {
+        // 16 dims × 4 bits = 64 bits = 4 × u16 (zero waste)
+        assert_eq!(QUALIA_WORDS, 4);
+        // +1 word for brightness bit
+        assert_eq!(BRIGHTNESS_WORD, 4);
+        // Leaves 1019 words for topology
+        assert_eq!(ELEMENTS_PER_CONTAINER - QUALIA_WORDS - 1, 1019);
     }
 }
