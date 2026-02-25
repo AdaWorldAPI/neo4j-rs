@@ -408,19 +408,39 @@ pub fn spo_distance(
 /// Number of nibble levels (4 bits = 16 levels, 0..15).
 pub const NIB4_LEVELS: u8 = 15;
 
-/// Number of qualia dimensions encoded as nibbles (16, not 17).
-/// The 17th dimension (resolution_hunger) is excluded and encoded as
-/// a 1-bit brightness/causality flag at the BF16 sign bit position.
+/// Number of qualia dimensions encoded as nibbles (16).
+/// The +1 intensity meta-property (RGB/CMYK, causing/caused) is encoded as
+/// a single bit at the BF16 sign position — same role as BF16's sign bit.
 pub const QUALIA_DIMS: usize = 16;
 
 /// The 16 nibble dimensions (canonical order).
+///
+/// Mapping to original JSON keys:
+///   brightness → brightness     rooting   → dominance
+///   valence    → valence        agency    → arousal
+///   resonance  → warmth         gravity   → nostalgia
+///   clarity    → clarity        reverence → sacredness
+///   social     → social         volition  → desire
+///   dissonance → tension        staunen   → awe
+///   loss       → grief          optimism  → hope
+///   friction   → edge           equilibrium → resolution_hunger
 pub const QUALIA_DIM_NAMES: &[&str] = &[
-    "valence", "arousal", "dominance", "warmth", "brightness",
-    "tension", "clarity", "social", "nostalgia", "sacredness",
-    "desire", "grief", "awe", "shame", "hope", "edge",
+    "glow", "valence", "rooting", "agency",
+    "resonance", "clarity", "social", "gravity",
+    "reverence", "volition", "dissonance", "staunen",
+    "loss", "optimism", "friction", "equilibrium",
 ];
 
-/// Total qualia bits: 16 nibbles + 1 brightness bit = 65 bits.
+/// Mapping from canonical dim names to original JSON vector keys.
+/// QUALIA_DIM_NAMES[i] reads from QUALIA_JSON_KEYS[i] in the source data.
+pub const QUALIA_JSON_KEYS: &[&str] = &[
+    "brightness", "valence", "dominance", "arousal",
+    "warmth", "clarity", "social", "nostalgia",
+    "sacredness", "desire", "tension", "awe",
+    "grief", "hope", "edge", "resolution_hunger",
+];
+
+/// Total qualia bits: 16 nibbles + 1 intensity bit = 65 bits.
 pub const QUALIA_BITS: usize = QUALIA_DIMS * 4 + 1; // 65
 
 /// Bits remaining for graph topology in a 16,384-bit container.
@@ -550,7 +570,7 @@ pub fn nib4_to_hex(nibs: &[u8]) -> String {
 }
 
 // ============================================================================
-// BF16-aligned packing: 16 dims + 1-bit brightness
+// BF16-aligned packing: 16 dims + 1-bit intensity
 // ============================================================================
 //
 // Container layout (1024 × u16 = BF16 format):
@@ -560,26 +580,34 @@ pub fn nib4_to_hex(nibs: &[u8]) -> String {
 // word 1:  [ nib_7 | nib_6 | nib_5 | nib_4 ]   ← brightness, tension, clarity, social
 // word 2:  [ nib_11| nib_10| nib_9 | nib_8 ]   ← nostalgia, sacredness, desire, grief
 // word 3:  [ nib_15| nib_14| nib_13| nib_12]   ← awe, shame, hope, edge
-// word 4:  [ B | 000...0000000000000 ]           ← bit 15 = brightness/causality (the +1)
+// word 4:  [ I | 000...0000000000000 ]           ← bit 15 = intensity meta-property
 // word 5..1023: topology (nodes/edges/NARS/SQL/GQL/DNtree/Btree)
 // ```
 //
 // 16 dims × 4 bits = 64 bits = exactly 4 u16 words. Zero waste.
-// The +1 (resolution_hunger → brightness bit) sits at BF16 sign position in word 4.
-// That way BF16 sign-comparison hardware treats it as direction/causality.
+//
+// The intensity bit (I) is the BF16 sign bit — a meta-property that switches
+// the causality mode for the entire vector:
+//
+//   I=0: RGB / additive / brightness / causing / emitting
+//   I=1: CMYK / subtractive / luminosity / caused / absorbing
+//
+// Same 16 nibbles, different direction of interpretation.
+// Like BF16 sign: doesn't change magnitude, changes direction.
 
 /// Number of u16 words for qualia nibbles (16 dims / 4 = 4 words).
 pub const QUALIA_WORDS: usize = QUALIA_DIMS / 4; // 16/4 = 4
 
-/// Word index where the brightness/causality bit lives.
-pub const BRIGHTNESS_WORD: usize = QUALIA_WORDS; // word 4
+/// Word index where the intensity meta-property bit lives.
+pub const INTENSITY_WORD: usize = QUALIA_WORDS; // word 4
 
-/// Bit position of the brightness flag within its word (BF16 sign bit).
-pub const BRIGHTNESS_BIT: u16 = 0x8000; // bit 15
+/// Bit position of the intensity flag within its word (BF16 sign bit).
+/// I=0: RGB/additive/causing. I=1: CMYK/subtractive/caused.
+pub const INTENSITY_BIT: u16 = 0x8000; // bit 15
 
-/// Pack 16 nibble dims + 1 brightness bit into BF16-aligned u16 words.
-/// Returns 5 u16 words: [4 words × 4 nibbles] + [brightness bit in word 4 sign position].
-pub fn nib4_pack_bf16(nibs: &[u8], brightness: bool) -> Vec<u16> {
+/// Pack 16 nibble dims + 1 intensity bit into BF16-aligned u16 words.
+/// Returns 5 u16 words: [4 words × 4 nibbles] + [intensity bit in word 4 sign position].
+pub fn nib4_pack_bf16(nibs: &[u8], intensity: bool) -> Vec<u16> {
     debug_assert!(nibs.len() <= 16, "max 16 nibble dims for BF16 alignment");
     let mut words = vec![0u16; QUALIA_WORDS + 1]; // 5 words
     for (i, &n) in nibs.iter().enumerate() {
@@ -587,14 +615,14 @@ pub fn nib4_pack_bf16(nibs: &[u8], brightness: bool) -> Vec<u16> {
         let nib_pos = i % 4;
         words[word_idx] |= ((n & 0xF) as u16) << (nib_pos * 4);
     }
-    // Brightness bit at BF16 sign position of word 4
-    if brightness {
-        words[BRIGHTNESS_WORD] |= BRIGHTNESS_BIT;
+    // Intensity bit at BF16 sign position of word 4
+    if intensity {
+        words[INTENSITY_WORD] |= INTENSITY_BIT;
     }
     words
 }
 
-/// Unpack BF16-aligned u16 words back to 16 nibbles + brightness bit.
+/// Unpack BF16-aligned u16 words back to 16 nibbles + intensity bit.
 pub fn nib4_unpack_bf16(words: &[u16]) -> (Vec<u8>, bool) {
     let nibs = (0..QUALIA_DIMS)
         .map(|i| {
@@ -603,12 +631,12 @@ pub fn nib4_unpack_bf16(words: &[u16]) -> (Vec<u8>, bool) {
             ((words[word_idx] >> (nib_pos * 4)) & 0xF) as u8
         })
         .collect();
-    let brightness = (words[BRIGHTNESS_WORD] & BRIGHTNESS_BIT) != 0;
-    (nibs, brightness)
+    let intensity = (words[INTENSITY_WORD] & INTENSITY_BIT) != 0;
+    (nibs, intensity)
 }
 
 /// Manhattan distance on BF16-aligned packed u16 words (16 nibble dims).
-/// Does NOT include brightness bit — that's a separate binary comparison.
+/// Does NOT include intensity bit — that's a separate binary comparison.
 pub fn nib4_distance_bf16_aligned(a: &[u16], b: &[u16]) -> u32 {
     let mut dist = 0u32;
     for w in 0..QUALIA_WORDS {
@@ -624,17 +652,19 @@ pub fn nib4_distance_bf16_aligned(a: &[u16], b: &[u16]) -> u32 {
     dist
 }
 
-/// Check if brightness/causality bits differ between two containers.
-pub fn nib4_brightness_differs(a: &[u16], b: &[u16]) -> bool {
-    (a[BRIGHTNESS_WORD] ^ b[BRIGHTNESS_WORD]) & BRIGHTNESS_BIT != 0
+/// Check if intensity meta-property bits differ between two containers.
+/// True = causality direction mismatch (RGB vs CMYK, causing vs caused).
+pub fn nib4_intensity_differs(a: &[u16], b: &[u16]) -> bool {
+    (a[INTENSITY_WORD] ^ b[INTENSITY_WORD]) & INTENSITY_BIT != 0
 }
 
-/// Full distance: 16-dim Manhattan + brightness penalty.
-/// Brightness mismatch adds a configurable penalty (default: 16 = one full dimension).
-pub fn nib4_full_distance(a: &[u16], b: &[u16], brightness_penalty: u32) -> u32 {
+/// Full distance: 16-dim Manhattan + intensity penalty.
+/// Intensity mismatch adds a configurable penalty (default: 16 = one full dimension).
+/// This penalizes comparing vectors in different causality modes.
+pub fn nib4_full_distance(a: &[u16], b: &[u16], intensity_penalty: u32) -> u32 {
     let mut dist = nib4_distance_bf16_aligned(a, b);
-    if nib4_brightness_differs(a, b) {
-        dist += brightness_penalty;
+    if nib4_intensity_differs(a, b) {
+        dist += intensity_penalty;
     }
     dist
 }
@@ -905,7 +935,7 @@ mod tests {
     }
 
     // ====================================================================
-    // Nib4 tests (16 dims + 1-bit brightness)
+    // Nib4 tests (16 dims + 1-bit intensity)
     // ====================================================================
 
     #[test]
@@ -981,30 +1011,30 @@ mod tests {
     }
 
     #[test]
-    fn nib4_bf16_aligned_packing_with_brightness() {
+    fn nib4_bf16_aligned_packing_with_intensity() {
         let nibs = vec![0xA, 0x5, 0xF, 0x0, 0x7, 0x3, 0xB, 0x8,
                         0x1, 0xE, 0x6, 0x9, 0x2, 0xD, 0x4, 0xC];
         assert_eq!(nibs.len(), 16);
 
-        // Pack with brightness = true
+        // Pack with intensity = true (CMYK/subtractive/caused)
         let packed = nib4_pack_bf16(&nibs, true);
-        assert_eq!(packed.len(), 5); // 4 words nibbles + 1 word brightness
+        assert_eq!(packed.len(), 5); // 4 words nibbles + 1 word intensity
 
         // First word: nibbles 0-3 → 0xA, 0x5, 0xF, 0x0 → 0x0F5A
         assert_eq!(packed[0], 0x0F5A);
 
-        // Brightness word (4) has sign bit set
-        assert_eq!(packed[BRIGHTNESS_WORD] & BRIGHTNESS_BIT, BRIGHTNESS_BIT);
+        // Intensity word (4) has sign bit set
+        assert_eq!(packed[INTENSITY_WORD] & INTENSITY_BIT, INTENSITY_BIT);
 
         // Roundtrip
-        let (unpacked, bright) = nib4_unpack_bf16(&packed);
+        let (unpacked, intensity) = nib4_unpack_bf16(&packed);
         assert_eq!(unpacked, nibs);
-        assert!(bright);
+        assert!(intensity);
 
-        // Pack with brightness = false
+        // Pack with intensity = false (RGB/additive/causing)
         let packed_no = nib4_pack_bf16(&nibs, false);
-        let (_, bright_no) = nib4_unpack_bf16(&packed_no);
-        assert!(!bright_no);
+        let (_, intensity_no) = nib4_unpack_bf16(&packed_no);
+        assert!(!intensity_no);
     }
 
     #[test]
@@ -1025,36 +1055,36 @@ mod tests {
     }
 
     #[test]
-    fn nib4_brightness_bit_detection() {
-        let a = nib4_pack_bf16(&vec![0u8; 16], true);
-        let b = nib4_pack_bf16(&vec![0u8; 16], false);
+    fn nib4_intensity_bit_detection() {
+        let a = nib4_pack_bf16(&vec![0u8; 16], true);  // CMYK
+        let b = nib4_pack_bf16(&vec![0u8; 16], false); // RGB
 
-        assert!(nib4_brightness_differs(&a, &b));
-        assert!(!nib4_brightness_differs(&a, &a));
-        assert!(!nib4_brightness_differs(&b, &b));
+        assert!(nib4_intensity_differs(&a, &b));  // RGB ≠ CMYK
+        assert!(!nib4_intensity_differs(&a, &a)); // CMYK = CMYK
+        assert!(!nib4_intensity_differs(&b, &b)); // RGB = RGB
     }
 
     #[test]
-    fn nib4_full_distance_includes_brightness() {
+    fn nib4_full_distance_includes_intensity() {
         let a_nibs = vec![5u8; 16];
         let b_nibs = vec![5u8; 16]; // identical nibbles
 
-        // Same brightness → distance 0
+        // Same intensity → distance 0
         let a = nib4_pack_bf16(&a_nibs, true);
         let b = nib4_pack_bf16(&b_nibs, true);
         assert_eq!(nib4_full_distance(&a, &b, 16), 0);
 
-        // Different brightness → distance = penalty
+        // Different intensity (causing vs caused) → distance = penalty
         let c = nib4_pack_bf16(&b_nibs, false);
         assert_eq!(nib4_full_distance(&a, &c, 16), 16);
     }
 
     #[test]
-    fn nib4_qualia_fits_in_4_bf16_words_plus_brightness() {
+    fn nib4_qualia_fits_in_4_bf16_words_plus_intensity() {
         // 16 dims × 4 bits = 64 bits = 4 × u16 (zero waste)
         assert_eq!(QUALIA_WORDS, 4);
-        // +1 word for brightness bit
-        assert_eq!(BRIGHTNESS_WORD, 4);
+        // +1 word for intensity bit
+        assert_eq!(INTENSITY_WORD, 4);
         // Leaves 1019 words for topology
         assert_eq!(ELEMENTS_PER_CONTAINER - QUALIA_WORDS - 1, 1019);
     }
