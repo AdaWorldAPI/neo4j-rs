@@ -11,9 +11,15 @@ pub mod relationship;
 pub mod path;
 pub mod value;
 pub mod property_map;
+pub mod awareness;
 
 pub use node::{Node, NodeId};
 pub use relationship::{Relationship, RelId, Direction};
 pub use path::Path;
 pub use value::Value;
 pub use property_map::PropertyMap;
+pub use awareness::{
+    AwarenessState, AwarenessTensor, AwarenessMask, AwarenessFilter,
+    CausalDirection, CausalPath, PerspectiveGestalt,
+    ResonanceEdge, ContainerRef, SpoSlot,
+};
