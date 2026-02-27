@@ -1,0 +1,57 @@
+---
+title: "AI War Cloud — ladybug-rs Demo"
+format: html
+filters:
+  - quarto-ladybug
+---
+
+# AI War Cloud Graph Queries
+
+This document demonstrates executing Cypher-syntax queries against the aiwar
+knowledge graph via ladybug-rs. Each code block posts to the ladybug-rs
+`/api/v1/cypher` endpoint and renders results as an interactive table.
+
+## Systems by Military Use
+
+```{ladybug}
+MATCH (s:System)
+WHERE s.military_use IS NOT NULL
+RETURN s.name, s.military_use, s.type
+ORDER BY s.name
+LIMIT 20
+```
+
+## Systems and Their Stakeholders
+
+```{ladybug}
+MATCH (s:System)-[:DEVELOPED_BY]->(st:Stakeholder)
+RETURN s.name, st.name, s.military_use
+ORDER BY s.year
+```
+
+## AI Capabilities by Category
+
+```{ladybug}
+MATCH (s:System)
+WHERE s.capacity IS NOT NULL
+RETURN s.capacity AS capability, count(s) AS system_count
+ORDER BY system_count DESC
+LIMIT 15
+```
+
+## Cross-Domain Links (Military / Civilian)
+
+```{ladybug}
+MATCH (s:System)
+WHERE s.military_use IS NOT NULL AND s.civic_use IS NOT NULL
+RETURN s.name, s.military_use, s.civic_use, s.type
+ORDER BY s.name
+```
+
+## Variable-Length Paths (Supply Chain)
+
+```{ladybug}
+MATCH path = (a:System)-[*1..3]->(b:System)
+RETURN a.name AS source, b.name AS target, length(path) AS hops
+LIMIT 10
+```

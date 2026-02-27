@@ -1,0 +1,101 @@
+/* ladybug-query.css — Styles for Cypher query blocks and results */
+
+.ladybug-query {
+  position: relative;
+}
+
+.ladybug-query .buttons {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 10;
+}
+
+.run-ladybug-button {
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  padding: 4px 8px;
+  font-size: 14px;
+  color: #666;
+  transition: color 0.2s;
+}
+
+.run-ladybug-button::before {
+  content: "\25B6"; /* unicode play triangle */
+  font-size: 16px;
+}
+
+.run-ladybug-button:hover {
+  color: #2563eb;
+}
+
+/* Result container */
+.ladybug-result {
+  margin-top: 0;
+  margin-bottom: 1em;
+  padding: 0.5em;
+  border-left: 4px solid #3b82f6;
+  background: #f8fafc;
+  font-family: inherit;
+  overflow-x: auto;
+}
+
+/* Result table */
+.ladybug-result-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+
+.ladybug-result-table th {
+  background: #e2e8f0;
+  padding: 6px 12px;
+  text-align: left;
+  border-bottom: 2px solid #cbd5e1;
+  font-weight: 600;
+}
+
+.ladybug-result-table td {
+  padding: 4px 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.ladybug-result-table tr:hover td {
+  background: #f1f5f9;
+}
+
+.ladybug-result-table .null {
+  color: #94a3b8;
+  font-style: italic;
+}
+
+/* Status messages */
+.ladybug-running {
+  color: #2563eb;
+  font-style: italic;
+  margin: 0;
+}
+
+.ladybug-empty {
+  color: #64748b;
+  font-style: italic;
+  margin: 0;
+}
+
+.ladybug-error {
+  color: #dc2626;
+  background: #fef2f2;
+  padding: 8px 12px;
+  border-radius: 4px;
+  border-left: 3px solid #dc2626;
+}
+
+/* Stats footer */
+.ladybug-stats {
+  color: #64748b;
+  font-size: 0.8em;
+  margin-top: 0.5em;
+  padding-top: 0.25em;
+  border-top: 1px solid #e2e8f0;
+}
