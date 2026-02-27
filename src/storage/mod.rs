@@ -14,9 +14,12 @@
 pub mod memory;
 #[cfg(feature = "bolt")]
 pub mod bolt;
-// DEPRECATED: ladybug module moved to .deprecated/pr19_container_dto/
-// #[cfg(feature = "ladybug")]
-// pub mod ladybug;
+/// Ladybug-rs BindSpace backend — the production engine.
+/// neo4j-rs is the glove, ladybug-rs is the hand.
+#[cfg(feature = "ladybug")]
+pub mod ladybug;
+#[cfg(feature = "ladybug")]
+pub use ladybug::LadybugBackend;
 #[cfg(feature = "ladybug-contract")]
 pub mod cogrecord;
 

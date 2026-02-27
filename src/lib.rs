@@ -52,6 +52,7 @@ pub mod execution;
 pub mod storage;
 pub mod tx;
 pub mod index;
+pub mod export;
 #[cfg(feature = "chess")]
 pub mod chess;
 #[cfg(feature = "chess")]
@@ -155,6 +156,23 @@ impl Graph<storage::MemoryBackend> {
     pub async fn open_memory() -> Result<Self> {
         let backend = storage::MemoryBackend::new();
         Ok(Self::with_backend(backend))
+    }
+}
+
+/// Ladybug-rs backed graph — production engine.
+/// The user sees Neo4j. ladybug-rs runs underneath.
+#[cfg(feature = "ladybug")]
+impl Graph<storage::LadybugBackend> {
+    /// Open a graph backed by ladybug-rs with a fresh BindSpace.
+    pub fn open_ladybug() -> Self {
+        let backend = storage::LadybugBackend::open();
+        Self::with_backend(backend)
+    }
+
+    /// Open a graph backed by an existing BindSpace (shared ownership).
+    pub fn with_bind_space(bs: std::sync::Arc<parking_lot::RwLock<ladybug::storage::bind_space::BindSpace>>) -> Self {
+        let backend = storage::LadybugBackend::new(bs);
+        Self::with_backend(backend)
     }
 }
 

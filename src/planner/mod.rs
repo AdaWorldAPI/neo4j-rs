@@ -4,7 +4,7 @@
 //! the execution engine maps to StorageBackend calls.
 
 use crate::model::PropertyMap;
-use crate::cypher::ast::*;
+use crate::cypher::ast::{self, *};
 use crate::{Error, Result};
 
 /// Logical plan node.
@@ -54,6 +54,16 @@ pub enum LogicalPlan {
     RemoveProperty { input: Box<LogicalPlan>, variable: String, key: String },
     /// REMOVE n:Label
     RemoveLabel { input: Box<LogicalPlan>, variable: String, label: String },
+    /// MERGE (upsert): match-or-create a node/pattern
+    MergeNode {
+        labels: Vec<String>,
+        properties: Vec<(String, Expr)>,
+        alias: String,
+        on_create: Vec<(String, String, Expr)>,
+        on_match: Vec<(String, String, Expr)>,
+    },
+    /// CREATE INDEX / CREATE CONSTRAINT / DROP INDEX / DROP CONSTRAINT
+    SchemaOp(SchemaCommand),
 }
 
 /// Create a logical plan from a parsed AST.
@@ -64,8 +74,8 @@ pub fn plan(ast: &Statement, params: &PropertyMap) -> Result<LogicalPlan> {
         Statement::Create(c) => plan_create(c),
         Statement::Delete(d) => plan_delete(d),
         Statement::Set(s) => plan_set(s),
-        Statement::Merge(_) => Err(Error::PlanError("MERGE not yet implemented".into())),
-        Statement::Schema(_) => Err(Error::PlanError("Schema commands not yet implemented in planner".into())),
+        Statement::Merge(m) => plan_merge(m),
+        Statement::Schema(s) => Ok(LogicalPlan::SchemaOp(s.clone())),
         Statement::Remove(r) => plan_remove(r),
     }
 }
@@ -366,6 +376,55 @@ fn plan_set(s: &SetClause) -> Result<LogicalPlan> {
     }
 
     if let Some(ref ret) = s.return_clause {
+        let items: Vec<(Expr, String)> = ret.items.iter().map(|item| {
+            let alias = item.alias.clone().unwrap_or_else(|| expr_default_alias(&item.expr));
+            (item.expr.clone(), alias)
+        }).collect();
+        current = LogicalPlan::Project {
+            input: Box::new(current),
+            items,
+        };
+    }
+
+    Ok(current)
+}
+
+fn plan_merge(m: &MergeClause) -> Result<LogicalPlan> {
+    // Extract the node from the MERGE pattern
+    let node_pattern = m.pattern.elements.iter().find_map(|e| {
+        if let PatternElement::Node(np) = e { Some(np) } else { None }
+    }).ok_or_else(|| Error::PlanError("MERGE requires at least one node pattern".into()))?;
+
+    let alias = node_pattern.alias.clone().unwrap_or_else(|| format!("_anon_{}", next_id()));
+    let properties: Vec<(String, Expr)> = node_pattern.properties.iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let on_create: Vec<(String, String, Expr)> = m.on_create.iter().filter_map(|item| {
+        if let ast::SetItem::Property { variable, key, value } = item {
+            Some((variable.clone(), key.clone(), value.clone()))
+        } else {
+            None
+        }
+    }).collect();
+
+    let on_match: Vec<(String, String, Expr)> = m.on_match.iter().filter_map(|item| {
+        if let ast::SetItem::Property { variable, key, value } = item {
+            Some((variable.clone(), key.clone(), value.clone()))
+        } else {
+            None
+        }
+    }).collect();
+
+    let mut current = LogicalPlan::MergeNode {
+        labels: node_pattern.labels.clone(),
+        properties,
+        alias: alias.clone(),
+        on_create,
+        on_match,
+    };
+
+    if let Some(ref ret) = m.return_clause {
         let items: Vec<(Expr, String)> = ret.items.iter().map(|item| {
             let alias = item.alias.clone().unwrap_or_else(|| expr_default_alias(&item.expr));
             (item.expr.clone(), alias)
