@@ -76,8 +76,8 @@ pub async fn export_cypher_dump<B: StorageBackend>(
             writeln!(
                 writer,
                 "MATCH (a {{_id: {}}}), (b {{_id: {}}}) CREATE (a)-[:{}{}]->(b);",
-                rel.start_node_id.0,
-                rel.end_node_id.0,
+                rel.src.0,
+                rel.dst.0,
                 rel.rel_type,
                 props_part,
             )?;
