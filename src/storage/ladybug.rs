@@ -106,6 +106,7 @@ fn bind_node_to_node(addr: Addr, bn: &BindNode) -> Node {
 
     Node {
         id: NodeId(addr.0 as u64),
+        element_id: None,
         labels,
         properties,
     }
@@ -367,9 +368,10 @@ impl StorageBackend for LadybugBackend {
                         .unwrap_or_else(|| "RELATED_TO".to_string());
                     rels.push(Relationship {
                         id: RelId(i as u64),
+                        element_id: None,
                         rel_type: verb_label,
-                        start_node_id: NodeId(edge.from.0 as u64),
-                        end_node_id: NodeId(edge.to.0 as u64),
+                        src: NodeId(edge.from.0 as u64),
+                        dst: NodeId(edge.to.0 as u64),
                         properties: PropertyMap::new(),
                     });
                 }
@@ -385,9 +387,10 @@ impl StorageBackend for LadybugBackend {
                         .unwrap_or_else(|| "RELATED_TO".to_string());
                     rels.push(Relationship {
                         id: RelId(10000 + i as u64),
+                        element_id: None,
                         rel_type: verb_label,
-                        start_node_id: NodeId(edge.from.0 as u64),
-                        end_node_id: NodeId(edge.to.0 as u64),
+                        src: NodeId(edge.from.0 as u64),
+                        dst: NodeId(edge.to.0 as u64),
                         properties: PropertyMap::new(),
                     });
                 }
@@ -464,9 +467,10 @@ impl StorageBackend for LadybugBackend {
                     .enumerate()
                     .map(|(i, (f, t))| Relationship {
                         id: RelId(i as u64),
+                        element_id: None,
                         rel_type: "RELATED_TO".to_string(),
-                        start_node_id: NodeId(f.0 as u64),
-                        end_node_id: NodeId(t.0 as u64),
+                        src: NodeId(f.0 as u64),
+                        dst: NodeId(t.0 as u64),
                         properties: PropertyMap::new(),
                     })
                     .collect();

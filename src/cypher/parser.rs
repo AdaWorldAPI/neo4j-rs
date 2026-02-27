@@ -91,9 +91,22 @@ pub fn parse_statement(tokens: &[Token]) -> Result<Statement> {
 
     let stmt = match p.peek_kind() {
         TokenKind::Match | TokenKind::OptionalMatch => parse_query_stmt(&mut p)?,
-        TokenKind::Create => parse_create_stmt(&mut p)?,
+        TokenKind::Create => {
+            // Peek ahead: CREATE INDEX / CREATE CONSTRAINT → schema
+            let saved = p.pos;
+            p.advance(); // eat CREATE
+            if p.at(TokenKind::Index) || p.at(TokenKind::Constraint) {
+                p.pos = saved;
+                parse_schema_stmt(&mut p)?
+            } else {
+                p.pos = saved;
+                parse_create_stmt(&mut p)?
+            }
+        }
+        TokenKind::Merge => parse_merge_stmt(&mut p)?,
         TokenKind::Delete | TokenKind::DetachDelete => parse_delete_stmt(&mut p)?,
         TokenKind::Call => parse_call_stmt(&mut p)?,
+        TokenKind::Drop => parse_schema_stmt(&mut p)?,
         kind => {
             // Try to parse as a query with UNWIND or WITH as starting clause
             if kind == TokenKind::Unwind || kind == TokenKind::With {
@@ -255,6 +268,269 @@ fn parse_create_stmt(p: &mut Parser) -> Result<Statement> {
     };
 
     Ok(Statement::Create(CreateClause { patterns, return_clause }))
+}
+
+fn parse_merge_stmt(p: &mut Parser) -> Result<Statement> {
+    p.expect(TokenKind::Merge)?;
+    let patterns = parse_pattern_list(p)?;
+
+    // The first pattern is the merge pattern
+    let pattern = patterns.into_iter().next()
+        .ok_or_else(|| p.error("MERGE requires a pattern".into()))?;
+
+    // Parse ON CREATE SET and ON MATCH SET
+    let mut on_create = Vec::new();
+    let mut on_match = Vec::new();
+
+    while p.at(TokenKind::On) {
+        p.advance(); // consume ON
+        // ON CREATE SET or ON MATCH SET
+        // CREATE and MATCH are keywords, so they get their own TokenKind
+        if p.at(TokenKind::Create) {
+            p.advance(); // consume CREATE
+            p.expect(TokenKind::Set)?;
+            on_create.extend(parse_set_items(p)?);
+        } else if p.at(TokenKind::Match) {
+            p.advance(); // consume MATCH
+            p.expect(TokenKind::Set)?;
+            on_match.extend(parse_set_items(p)?);
+        } else {
+            return Err(p.error(format!("Expected CREATE or MATCH after ON, got '{}'", p.peek().text)));
+        }
+    }
+
+    let return_clause = if p.at(TokenKind::Return) {
+        p.advance();
+        Some(parse_return_clause(p)?)
+    } else {
+        None
+    };
+
+    Ok(Statement::Merge(MergeClause {
+        pattern,
+        on_create,
+        on_match,
+        return_clause,
+    }))
+}
+
+fn parse_schema_stmt(p: &mut Parser) -> Result<Statement> {
+    if p.at(TokenKind::Create) {
+        p.advance(); // CREATE
+        if p.at(TokenKind::Index) {
+            p.advance(); // INDEX
+            // CREATE INDEX [name] FOR (n:Label) ON (n.property)
+            // or CREATE INDEX ON :Label(property)
+            parse_create_index(p)
+        } else if p.at(TokenKind::Constraint) {
+            p.advance(); // CONSTRAINT
+            parse_create_constraint(p)
+        } else {
+            Err(p.error("Expected INDEX or CONSTRAINT after CREATE".into()))
+        }
+    } else if p.at(TokenKind::Drop) {
+        p.advance(); // DROP
+        if p.at(TokenKind::Index) {
+            p.advance(); // INDEX
+            parse_drop_index(p)
+        } else if p.at(TokenKind::Constraint) {
+            p.advance(); // CONSTRAINT
+            parse_drop_constraint(p)
+        } else {
+            Err(p.error("Expected INDEX or CONSTRAINT after DROP".into()))
+        }
+    } else {
+        Err(p.error("Expected CREATE or DROP for schema command".into()))
+    }
+}
+
+fn parse_create_index(p: &mut Parser) -> Result<Statement> {
+    // CREATE INDEX [name] FOR (n:Label) ON (n.property)
+    // or simplified: CREATE INDEX ON :Label(property)
+
+    // Optional index name (identifier)
+    let _name = if p.at(TokenKind::Identifier) && !p.at(TokenKind::On) && !p.at(TokenKind::For) {
+        let tok = p.advance();
+        Some(tok.text.clone())
+    } else {
+        None
+    };
+
+    // Optional index type: BTREE | TEXT | RANGE | POINT | VECTOR
+    let index_type = None;
+
+    if p.at(TokenKind::On) {
+        p.advance(); // ON
+        // :Label(property) syntax
+        p.expect(TokenKind::Colon)?;
+        let label_tok = p.advance();
+        let label = label_tok.text.clone();
+        p.expect(TokenKind::LParen)?;
+        let prop_tok = p.advance();
+        let property = prop_tok.text.clone();
+        p.expect(TokenKind::RParen)?;
+
+        return Ok(Statement::Schema(SchemaCommand::CreateIndex {
+            label,
+            property,
+            index_type,
+        }));
+    }
+
+    if p.at(TokenKind::For) {
+        p.advance(); // FOR
+        p.expect(TokenKind::LParen)?;
+        // (n:Label)
+        let _alias = p.advance(); // variable
+        p.expect(TokenKind::Colon)?;
+        let label_tok = p.advance();
+        let label = label_tok.text.clone();
+        p.expect(TokenKind::RParen)?;
+
+        p.expect(TokenKind::On)?;
+        p.expect(TokenKind::LParen)?;
+        // (n.property)
+        let _alias2 = p.advance(); // variable
+        p.expect(TokenKind::Dot)?;
+        let prop_tok = p.advance();
+        let property = prop_tok.text.clone();
+        p.expect(TokenKind::RParen)?;
+
+        // Optional OPTIONS
+        if p.at(TokenKind::Identifier) && p.peek().text.eq_ignore_ascii_case("OPTIONS") {
+            p.advance();
+            // Skip options block for now
+            if p.at(TokenKind::LBrace) {
+                let _ = skip_braced(p);
+            }
+        }
+
+        return Ok(Statement::Schema(SchemaCommand::CreateIndex {
+            label,
+            property,
+            index_type,
+        }));
+    }
+
+    Err(p.error("Expected ON or FOR after CREATE INDEX".into()))
+}
+
+fn parse_create_constraint(p: &mut Parser) -> Result<Statement> {
+    // CREATE CONSTRAINT [name] FOR (n:Label) REQUIRE n.property IS UNIQUE
+    // or CREATE CONSTRAINT ON (n:Label) ASSERT n.property IS UNIQUE
+
+    // Optional name
+    let _name = if p.at(TokenKind::Identifier)
+        && !p.at(TokenKind::On)
+        && !p.at(TokenKind::For)
+    {
+        let tok = p.advance();
+        Some(tok.text.clone())
+    } else {
+        None
+    };
+
+    // FOR or ON
+    if p.at(TokenKind::For) || p.at(TokenKind::On) {
+        p.advance();
+    } else {
+        return Err(p.error("Expected FOR or ON after CONSTRAINT [name]".into()));
+    }
+
+    p.expect(TokenKind::LParen)?;
+    let _alias = p.advance(); // variable name
+    p.expect(TokenKind::Colon)?;
+    let label_tok = p.advance();
+    let label = label_tok.text.clone();
+    p.expect(TokenKind::RParen)?;
+
+    // REQUIRE or ASSERT (these are identifier tokens, not keywords)
+    let _req_tok = p.advance(); // REQUIRE / ASSERT
+    let _alias2 = p.advance(); // variable
+    p.expect(TokenKind::Dot)?;
+    let prop_tok = p.advance();
+    let property = prop_tok.text.clone();
+
+    // IS [NOT NULL | UNIQUE]
+    let constraint_type = if p.at(TokenKind::Is) {
+        p.advance(); // IS
+        let type_tok = p.advance();
+        type_tok.text.to_uppercase()
+    } else {
+        "UNIQUE".to_string()
+    };
+
+    Ok(Statement::Schema(SchemaCommand::CreateConstraint {
+        label,
+        property,
+        constraint_type,
+    }))
+}
+
+fn parse_drop_index(p: &mut Parser) -> Result<Statement> {
+    // DROP INDEX ON :Label(property)
+    // or DROP INDEX name
+
+    if p.at(TokenKind::On) {
+        p.advance();
+        p.expect(TokenKind::Colon)?;
+        let label_tok = p.advance();
+        let label = label_tok.text.clone();
+        p.expect(TokenKind::LParen)?;
+        let prop_tok = p.advance();
+        let property = prop_tok.text.clone();
+        p.expect(TokenKind::RParen)?;
+        Ok(Statement::Schema(SchemaCommand::DropIndex { label, property }))
+    } else {
+        // DROP INDEX name — we need the index name to resolve to label/property
+        let name_tok = p.advance();
+        Ok(Statement::Schema(SchemaCommand::DropIndex {
+            label: name_tok.text.clone(),
+            property: String::new(),
+        }))
+    }
+}
+
+fn parse_drop_constraint(p: &mut Parser) -> Result<Statement> {
+    // DROP CONSTRAINT ON (n:Label) ASSERT n.property IS UNIQUE
+    // or DROP CONSTRAINT name
+
+    if p.at(TokenKind::On) {
+        p.advance();
+        p.expect(TokenKind::LParen)?;
+        let _alias = p.advance();
+        p.expect(TokenKind::Colon)?;
+        let label_tok = p.advance();
+        let label = label_tok.text.clone();
+        p.expect(TokenKind::RParen)?;
+        // Skip ASSERT ... IS UNIQUE/NOT NULL
+        while !p.at(TokenKind::Eof) && !p.at(TokenKind::Semicolon) {
+            p.advance();
+        }
+        Ok(Statement::Schema(SchemaCommand::DropConstraint {
+            label,
+            property: String::new(),
+        }))
+    } else {
+        let name_tok = p.advance();
+        Ok(Statement::Schema(SchemaCommand::DropConstraint {
+            label: name_tok.text.clone(),
+            property: String::new(),
+        }))
+    }
+}
+
+/// Skip a brace-delimited block `{ ... }`.
+fn skip_braced(p: &mut Parser) -> Result<()> {
+    p.expect(TokenKind::LBrace)?;
+    let mut depth = 1u32;
+    while depth > 0 && !p.at(TokenKind::Eof) {
+        if p.at(TokenKind::LBrace) { depth += 1; }
+        if p.at(TokenKind::RBrace) { depth -= 1; }
+        if depth > 0 { p.advance(); }
+    }
+    p.expect(TokenKind::RBrace)?;
+    Ok(())
 }
 
 fn parse_delete_stmt(p: &mut Parser) -> Result<Statement> {
