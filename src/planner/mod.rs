@@ -201,7 +201,7 @@ fn plan_pattern(pattern: &Pattern) -> Result<LogicalPlan> {
             }
             PatternElement::Relationship(rp) => {
                 let from = last_alias.clone().ok_or_else(|| {
-                    Error::PlanError("Relationship pattern without preceding node".into())
+                    crate::plan_err!("Relationship pattern without preceding node")
                 })?;
 
                 i += 1;
@@ -211,10 +211,10 @@ fn plan_pattern(pattern: &Pattern) -> Result<LogicalPlan> {
                         i += 1;
                         a
                     } else {
-                        return Err(Error::PlanError("Expected node after relationship".into()));
+                        return Err(crate::plan_err!("Expected node after relationship"));
                     }
                 } else {
-                    return Err(Error::PlanError("Relationship pattern must end with node".into()));
+                    return Err(crate::plan_err!("Relationship pattern must end with node"));
                 };
 
                 let dir = match rp.direction {
@@ -237,7 +237,7 @@ fn plan_pattern(pattern: &Pattern) -> Result<LogicalPlan> {
         }
     }
 
-    plan.ok_or_else(|| Error::PlanError("Empty pattern".into()))
+    plan.ok_or_else(|| crate::plan_err!("Empty pattern"))
 }
 
 fn plan_create(c: &CreateClause) -> Result<LogicalPlan> {
@@ -290,7 +290,7 @@ fn plan_create(c: &CreateClause) -> Result<LogicalPlan> {
                 }
                 PatternElement::Relationship(rp) => {
                     let src_alias = last_alias.clone().ok_or_else(|| {
-                        Error::PlanError("Relationship pattern without preceding node".into())
+                        crate::plan_err!("Relationship pattern without preceding node")
                     })?;
 
                     i += 1;
@@ -317,10 +317,10 @@ fn plan_create(c: &CreateClause) -> Result<LogicalPlan> {
                             i += 1;
                             a
                         } else {
-                            return Err(Error::PlanError("Expected node after relationship".into()));
+                            return Err(crate::plan_err!("Expected node after relationship"));
                         }
                     } else {
-                        return Err(Error::PlanError("Relationship pattern must end with node".into()));
+                        return Err(crate::plan_err!("Relationship pattern must end with node"));
                     };
 
                     let rel_type = rp.rel_types.first().cloned().unwrap_or_else(|| "RELATED_TO".into());
@@ -460,7 +460,7 @@ fn plan_set(s: &SetClause) -> Result<LogicalPlan> {
                     value: value.clone(),
                 };
             }
-            _ => return Err(Error::PlanError("Only SET n.prop = expr is currently supported".into())),
+            _ => return Err(crate::plan_err!("Only SET n.prop = expr is currently supported")),
         }
     }
 
@@ -497,11 +497,11 @@ fn plan_merge(m: &MergeClause) -> Result<LogicalPlan> {
     // Extract the node from the MERGE pattern
     let node_pattern = m.pattern.elements.iter().find_map(|e| {
         if let PatternElement::Node(np) = e { Some(np) } else { None }
-    }).ok_or_else(|| Error::PlanError("MERGE requires at least one node pattern".into()))?;
+    }).ok_or_else(|| crate::plan_err!("MERGE requires at least one node pattern"))?;
 
     let alias = node_pattern.alias.clone().unwrap_or_else(|| format!("_anon_{}", next_id()));
     let properties: Vec<(String, Expr)> = node_pattern.properties.iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v): (&String, &Expr)| (k.clone(), v.clone()))
         .collect();
 
     let on_create: Vec<(String, String, Expr)> = m.on_create.iter().filter_map(|item| {
