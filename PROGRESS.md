@@ -260,6 +260,9 @@ cargo test --features ladybug --test e2e_ladybug
 | `MATCH...CREATE` | - | `CreateClause.matches` | `parse_create_after_match` | piped `CreateRel` | `e2e_compound.rs` (5) | **FIXED** |
 | `MATCH...MERGE` | - | `MergeClause.matches` | `parse_merge_after_match` | piped `MergeNode` | `e2e_compound.rs` (2) | **FIXED** |
 | `UNWIND` | `Unwind` | `Query.unwinds` | `parse_query_stmt` loop | `LogicalPlan::Unwind` | `test_unwind_list` + 2 | **FIXED** |
+| `MERGE...SET` | - | `on_create+on_match` | both merge parsers | via `MergeNode` | `test_harvest_pattern_merge_then_set` | **FIXED** |
+| `MERGE...WITH...MATCH...MERGE rel` | - | - | - | - | ignored | **Needs MergeRel + WITH planner** |
+| `MATCH...MERGE rel + SET` | - | - | - | - | ignored | **Needs MergeRel** |
 | `WITH` clause | Yes | `WithClause` | Parsed | Planner missing | - | Open |
 
 **Fix details (STARTS WITH / ENDS WITH / CONTAINS):**
@@ -289,7 +292,7 @@ counts, node reimport, empty graph, labels, and relationship endpoints.
 
 ## Test Summary
 
-### neo4j-rs (177 pass, 0 ignored)
+### neo4j-rs (185 pass, 2 ignored)
 ```
 Unit tests (lib)          87 pass  (lexer 12, parser 23, export 2, model 29, storage 8, etc.)
 tests/e2e_basic.rs        10 pass  (core CRUD + query)
@@ -299,7 +302,9 @@ tests/e2e_traversal.rs    10 pass  (1-hop, 2-hop, bidirectional, triangle)
 tests/e2e_edge_cases.rs   18 pass  (NULL, IN, CASE, arithmetic, params, boolean,
                                      STARTS WITH, ENDS WITH, CONTAINS, UNWIND)
 tests/e2e_aiwar.rs         8 pass  (aiwar domain: create, query, aggregate, export)
-tests/e2e_compound.rs      9 pass  (MATCH...CREATE, MATCH...MERGE, UNWIND, export roundtrip)
+tests/e2e_compound.rs     11 pass  (MATCH...CREATE, MATCH...MERGE, MERGE+SET, UNWIND,
+                                     export roundtrip, harvest patterns)
+                            2 ignore (MERGE-rel harvest patterns — need MergeRel)
 tests/e2e_export_roundtrip.rs  8 pass  (format, properties, counts, reimport, labels, rels)
 tests/e2e_ladybug.rs       0 pass  (9 tests feature-gated behind #[cfg(feature = "ladybug")])
 doctests                    1 pass

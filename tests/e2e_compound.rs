@@ -220,3 +220,87 @@ async fn test_unwind_with_match() {
 
     assert_eq!(result.rows.len(), 2, "UNWIND should produce 2 rows");
 }
+
+// ============================================================================
+// Harvest pattern smoke tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_harvest_pattern_merge_set() {
+    // Pattern from aiwar_full.cypher: MERGE multi-label node + SET
+    let graph = Graph::open_memory().await.unwrap();
+    graph.mutate(
+        "MERGE (n:System:Operation {id: 'Lavender'})",
+        PropertyMap::new(),
+    ).await.unwrap();
+
+    let result = graph.execute(
+        "MATCH (n:System) RETURN n.id",
+        PropertyMap::new(),
+    ).await.unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0].get::<String>("n.id").unwrap(), "Lavender");
+}
+
+#[tokio::test]
+#[ignore = "Requires MERGE...WITH pipeline + MERGE for relationships (MergeRel)"]
+async fn test_harvest_pattern_merge_with_match_merge_rel() {
+    // Pattern from aiwar_full.cypher: schema ontology (372 statements)
+    // MERGE (v:SchemaValue {value: 'X'}) WITH v MATCH (a:SchemaAxis {name: 'Y'}) MERGE (v)-[:VALID_FOR]->(a)
+    let graph = Graph::open_memory().await.unwrap();
+
+    // Seed the axis node
+    graph.mutate("MERGE (:SchemaAxis {name: 'currentStatus'})", PropertyMap::new()).await.unwrap();
+
+    // The compound pattern
+    graph.mutate(
+        "MERGE (v:SchemaValue {value: 'Development'}) WITH v MATCH (a:SchemaAxis {name: 'currentStatus'}) MERGE (v)-[:VALID_FOR]->(a)",
+        PropertyMap::new(),
+    ).await.unwrap();
+
+    let result = graph.execute(
+        "MATCH (v:SchemaValue)-[:VALID_FOR]->(a:SchemaAxis) RETURN v.value, a.name",
+        PropertyMap::new(),
+    ).await.unwrap();
+    assert_eq!(result.rows.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "Requires MERGE for relationships (MergeRel) + SET on relationship properties"]
+async fn test_harvest_pattern_match_merge_rel_set() {
+    // Pattern from aiwar_full.cypher: edge creation (331 statements)
+    // MATCH (a {id: 'X'}) MATCH (b {id: 'Y'}) MERGE (a)-[r:REL]->(b) SET r.label = '...'
+    let graph = Graph::open_memory().await.unwrap();
+
+    graph.mutate("CREATE (n {id: 'Unit8200'})", PropertyMap::new()).await.unwrap();
+    graph.mutate("CREATE (n {id: 'Lavender'})", PropertyMap::new()).await.unwrap();
+
+    graph.mutate(
+        "MATCH (a {id: 'Unit8200'}) MATCH (b {id: 'Lavender'}) MERGE (a)-[r:DEVELOPED_BY]->(b) SET r.label = 'developed', r.weight = 2",
+        PropertyMap::new(),
+    ).await.unwrap();
+
+    let result = graph.execute(
+        "MATCH (a)-[r:DEVELOPED_BY]->(b) RETURN a.id, b.id, r.label",
+        PropertyMap::new(),
+    ).await.unwrap();
+    assert_eq!(result.rows.len(), 1);
+}
+
+#[tokio::test]
+async fn test_harvest_pattern_merge_then_set() {
+    // Full pattern 1: MERGE node + SET properties (the way ingest.rs generates it)
+    let graph = Graph::open_memory().await.unwrap();
+    graph.mutate(
+        "MERGE (n:System:Operation {id: 'AIP'}) SET n.name = 'Artificial Intelligence Platform', n.year = 2022",
+        PropertyMap::new(),
+    ).await.unwrap();
+
+    let result = graph.execute(
+        "MATCH (n:System) RETURN n.name, n.year",
+        PropertyMap::new(),
+    ).await.unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0].get::<String>("n.name").unwrap(), "Artificial Intelligence Platform");
+    assert_eq!(result.rows[0].get::<i64>("n.year").unwrap(), 2022);
+}

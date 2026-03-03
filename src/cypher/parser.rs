@@ -368,6 +368,14 @@ fn parse_merge_after_match(
         }
     }
 
+    // Plain SET after MERGE applies regardless of create/match — add to both
+    if p.at(TokenKind::Set) {
+        p.advance();
+        let items = parse_set_items(p)?;
+        on_create.extend(items.clone());
+        on_match.extend(items);
+    }
+
     let return_clause = if p.at(TokenKind::Return) {
         p.advance();
         Some(parse_return_clause(p)?)
@@ -412,6 +420,14 @@ fn parse_merge_stmt(p: &mut Parser) -> Result<Statement> {
         } else {
             return Err(p.error(format!("Expected CREATE or MATCH after ON, got '{}'", p.peek().text)));
         }
+    }
+
+    // Plain SET after MERGE applies regardless of create/match — add to both
+    if p.at(TokenKind::Set) {
+        p.advance();
+        let items = parse_set_items(p)?;
+        on_create.extend(items.clone());
+        on_match.extend(items);
     }
 
     let return_clause = if p.at(TokenKind::Return) {
