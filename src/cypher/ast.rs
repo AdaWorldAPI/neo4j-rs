@@ -204,15 +204,24 @@ pub enum StringOp {
 // ============================================================================
 
 /// CREATE clause.
+///
+/// When `matches` is non-empty, this is a compound `MATCH ... CREATE ...` statement.
+/// The MATCH bindings are available in the CREATE patterns (e.g. for relationship creation).
 #[derive(Debug, Clone)]
 pub struct CreateClause {
+    pub matches: Vec<MatchClause>,
+    pub where_clause: Option<Expr>,
     pub patterns: Vec<Pattern>,
     pub return_clause: Option<ReturnClause>,
 }
 
 /// MERGE clause.
+///
+/// When `matches` is non-empty, this is a compound `MATCH ... MERGE ...` statement.
 #[derive(Debug, Clone)]
 pub struct MergeClause {
+    pub matches: Vec<MatchClause>,
+    pub where_clause: Option<Expr>,
     pub pattern: Pattern,
     pub on_create: Vec<SetItem>,
     pub on_match: Vec<SetItem>,

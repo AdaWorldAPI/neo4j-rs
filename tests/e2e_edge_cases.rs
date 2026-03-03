@@ -172,9 +172,6 @@ async fn test_is_not_null_filter() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "Parser does not yet support STARTS WITH in WHERE clause expressions. \
-            The StringOp AST node and executor logic exist, but the parser fails \
-            to parse 'n.name STARTS WITH ...' syntax."]
 async fn test_string_starts_with() {
     let graph = setup_people().await;
 
@@ -201,9 +198,6 @@ async fn test_string_starts_with() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "Parser does not yet support CONTAINS in WHERE clause expressions. \
-            The StringOp AST node and executor logic exist, but the parser fails \
-            to parse 'n.name CONTAINS ...' syntax."]
 async fn test_string_contains() {
     let graph = setup_people().await;
 
@@ -230,9 +224,6 @@ async fn test_string_contains() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "Parser does not yet support ENDS WITH in WHERE clause expressions. \
-            The StringOp AST node and executor logic exist, but the parser fails \
-            to parse 'n.name ENDS WITH ...' syntax."]
 async fn test_string_ends_with() {
     let graph = setup_people().await;
 

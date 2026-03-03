@@ -288,7 +288,45 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         text: String::new(),
     });
 
+    // Merge multi-word keywords: STARTS WITH → StartsWith, ENDS WITH → EndsWith
+    let tokens = merge_multiword_keywords(tokens);
+
     Ok(tokens)
+}
+
+/// Merge multi-word keywords into single tokens.
+///
+/// Cypher has two-word keywords: `STARTS WITH` and `ENDS WITH`.
+/// The main tokenizer produces these as `Identifier("STARTS") + With` (or "ENDS").
+/// This pass merges them into `StartsWith` / `EndsWith` tokens.
+fn merge_multiword_keywords(tokens: Vec<Token>) -> Vec<Token> {
+    let mut result = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        if i + 1 < tokens.len() && tokens[i + 1].kind == TokenKind::With {
+            let upper = tokens[i].text.to_uppercase();
+            if upper == "STARTS" {
+                result.push(Token {
+                    kind: TokenKind::StartsWith,
+                    span: Span { start: tokens[i].span.start, end: tokens[i + 1].span.end },
+                    text: "STARTS WITH".to_string(),
+                });
+                i += 2;
+                continue;
+            } else if upper == "ENDS" {
+                result.push(Token {
+                    kind: TokenKind::EndsWith,
+                    span: Span { start: tokens[i].span.start, end: tokens[i + 1].span.end },
+                    text: "ENDS WITH".to_string(),
+                });
+                i += 2;
+                continue;
+            }
+        }
+        result.push(tokens[i].clone());
+        i += 1;
+    }
+    result
 }
 
 fn punct(kind: TokenKind, pos: usize, text: &str) -> Token {
@@ -341,6 +379,7 @@ fn keyword_or_ident(s: &str) -> TokenKind {
         "DROP" => TokenKind::Drop,
         "ON" => TokenKind::On,
         "FOR" => TokenKind::For,
+        "CONTAINS" => TokenKind::Contains,
         "CALL" => TokenKind::Call,
         "YIELD" => TokenKind::Yield,
         _ => TokenKind::Identifier,
@@ -431,5 +470,54 @@ mod tests {
         let param_token = &tokens[0];
         assert_eq!(param_token.span.start, 0);
         assert_eq!(param_token.span.end, 8); // $ + myParam = 8 chars
+    }
+
+    #[test]
+    fn test_starts_with_keyword() {
+        let tokens = tokenize("n.name STARTS WITH 'Al'").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(kinds, vec![
+            TokenKind::Identifier, // n
+            TokenKind::Dot,
+            TokenKind::Identifier, // name
+            TokenKind::StartsWith,
+            TokenKind::StringLiteral, // 'Al'
+            TokenKind::Eof,
+        ]);
+    }
+
+    #[test]
+    fn test_ends_with_keyword() {
+        let tokens = tokenize("n.name ENDS WITH 'ce'").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(kinds, vec![
+            TokenKind::Identifier,
+            TokenKind::Dot,
+            TokenKind::Identifier,
+            TokenKind::EndsWith,
+            TokenKind::StringLiteral,
+            TokenKind::Eof,
+        ]);
+    }
+
+    #[test]
+    fn test_contains_keyword() {
+        let tokens = tokenize("n.name CONTAINS 'ob'").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(kinds, vec![
+            TokenKind::Identifier,
+            TokenKind::Dot,
+            TokenKind::Identifier,
+            TokenKind::Contains,
+            TokenKind::StringLiteral,
+            TokenKind::Eof,
+        ]);
+    }
+
+    #[test]
+    fn test_with_keyword_not_consumed_by_starts() {
+        // Make sure "WITH" in "RETURN ... WITH ..." context is not mistakenly merged
+        let tokens = tokenize("MATCH (n) WITH n RETURN n").unwrap();
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::With));
     }
 }

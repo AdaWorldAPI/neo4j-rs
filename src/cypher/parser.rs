@@ -212,6 +212,25 @@ fn parse_query_stmt(p: &mut Parser) -> Result<Statement> {
         return parse_remove_after_match(p, matches, where_clause);
     }
 
+    // If we hit CREATE after MATCH, it's a MATCH...CREATE
+    if p.at(TokenKind::Create) {
+        // Peek ahead: CREATE INDEX / CREATE CONSTRAINT → not compound (shouldn't happen after MATCH)
+        let saved = p.pos;
+        p.advance(); // eat CREATE
+        if p.at(TokenKind::Index) || p.at(TokenKind::Constraint) {
+            p.pos = saved;
+            // fall through to RETURN error
+        } else {
+            p.pos = saved;
+            return parse_create_after_match(p, matches, where_clause);
+        }
+    }
+
+    // If we hit MERGE after MATCH, it's a MATCH...MERGE
+    if p.at(TokenKind::Merge) {
+        return parse_merge_after_match(p, matches, where_clause);
+    }
+
     // Must have RETURN
     if !p.at(TokenKind::Return) {
         return Err(p.error("Expected RETURN clause".into()));
@@ -267,7 +286,83 @@ fn parse_create_stmt(p: &mut Parser) -> Result<Statement> {
         None
     };
 
-    Ok(Statement::Create(CreateClause { patterns, return_clause }))
+    Ok(Statement::Create(CreateClause {
+        matches: Vec::new(),
+        where_clause: None,
+        patterns,
+        return_clause,
+    }))
+}
+
+/// Parse MATCH ... WHERE ... CREATE ... (compound statement)
+fn parse_create_after_match(
+    p: &mut Parser,
+    matches: Vec<MatchClause>,
+    where_clause: Option<Expr>,
+) -> Result<Statement> {
+    p.expect(TokenKind::Create)?;
+    let patterns = parse_pattern_list(p)?;
+
+    let return_clause = if p.at(TokenKind::Return) {
+        p.advance();
+        Some(parse_return_clause(p)?)
+    } else {
+        None
+    };
+
+    Ok(Statement::Create(CreateClause {
+        matches,
+        where_clause,
+        patterns,
+        return_clause,
+    }))
+}
+
+/// Parse MATCH ... WHERE ... MERGE ... (compound statement)
+fn parse_merge_after_match(
+    p: &mut Parser,
+    matches: Vec<MatchClause>,
+    where_clause: Option<Expr>,
+) -> Result<Statement> {
+    p.expect(TokenKind::Merge)?;
+    let patterns = parse_pattern_list(p)?;
+
+    let pattern = patterns.into_iter().next()
+        .ok_or_else(|| p.error("MERGE requires a pattern".into()))?;
+
+    let mut on_create = Vec::new();
+    let mut on_match = Vec::new();
+
+    while p.at(TokenKind::On) {
+        p.advance();
+        if p.at(TokenKind::Create) {
+            p.advance();
+            p.expect(TokenKind::Set)?;
+            on_create.extend(parse_set_items(p)?);
+        } else if p.at(TokenKind::Match) {
+            p.advance();
+            p.expect(TokenKind::Set)?;
+            on_match.extend(parse_set_items(p)?);
+        } else {
+            return Err(p.error(format!("Expected CREATE or MATCH after ON, got '{}'", p.peek().text)));
+        }
+    }
+
+    let return_clause = if p.at(TokenKind::Return) {
+        p.advance();
+        Some(parse_return_clause(p)?)
+    } else {
+        None
+    };
+
+    Ok(Statement::Merge(MergeClause {
+        matches,
+        where_clause,
+        pattern,
+        on_create,
+        on_match,
+        return_clause,
+    }))
 }
 
 fn parse_merge_stmt(p: &mut Parser) -> Result<Statement> {
@@ -307,6 +402,8 @@ fn parse_merge_stmt(p: &mut Parser) -> Result<Statement> {
     };
 
     Ok(Statement::Merge(MergeClause {
+        matches: Vec::new(),
+        where_clause: None,
         pattern,
         on_create,
         on_match,

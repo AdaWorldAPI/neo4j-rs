@@ -24,8 +24,8 @@ pub enum LogicalPlan {
     Project { input: Box<LogicalPlan>, items: Vec<(Expr, String)> },
     /// Create node
     CreateNode { labels: Vec<String>, properties: Vec<(String, Expr)>, alias: String },
-    /// Create relationship
-    CreateRel { src: String, dst: String, rel_type: String, properties: Vec<(String, Expr)> },
+    /// Create relationship (optionally piped from an input plan for MATCH...CREATE)
+    CreateRel { input: Option<Box<LogicalPlan>>, src: String, dst: String, rel_type: String, properties: Vec<(String, Expr)> },
     /// Limit output rows
     Limit { input: Box<LogicalPlan>, count: usize },
     /// Skip first N rows
@@ -231,48 +231,127 @@ fn plan_pattern(pattern: &Pattern) -> Result<LogicalPlan> {
 }
 
 fn plan_create(c: &CreateClause) -> Result<LogicalPlan> {
-    let mut plans = Vec::new();
+    // Start from MATCH clauses if present (compound MATCH...CREATE)
+    let mut current: Option<LogicalPlan> = if c.matches.is_empty() {
+        None
+    } else {
+        Some(plan_matches(&c.matches)?)
+    };
+
+    if let Some(ref where_expr) = c.where_clause {
+        let input = current.take().unwrap_or(LogicalPlan::Argument);
+        current = Some(LogicalPlan::Filter {
+            input: Box::new(input),
+            predicate: where_expr.clone(),
+        });
+    }
 
     for pattern in &c.patterns {
-        for elem in &pattern.elements {
-            if let PatternElement::Node(np) = elem {
-                let alias = np.alias.clone().unwrap_or_else(|| format!("_anon_{}", next_id()));
-                let properties: Vec<(String, Expr)> = np.properties.iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                plans.push(LogicalPlan::CreateNode {
-                    labels: np.labels.clone(),
-                    properties,
-                    alias,
-                });
+        let mut i = 0;
+        let mut last_alias: Option<String> = None;
+
+        while i < pattern.elements.len() {
+            match &pattern.elements[i] {
+                PatternElement::Node(np) => {
+                    let alias = np.alias.clone().unwrap_or_else(|| format!("_anon_{}", next_id()));
+
+                    // Only emit CreateNode if the node has labels or properties.
+                    // A bare (alias) is a reference to a MATCH binding.
+                    if !np.labels.is_empty() || !np.properties.is_empty() {
+                        let properties: Vec<(String, Expr)> = np.properties.iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        let create = LogicalPlan::CreateNode {
+                            labels: np.labels.clone(),
+                            properties,
+                            alias: alias.clone(),
+                        };
+                        current = Some(match current.take() {
+                            Some(prev) => LogicalPlan::CartesianProduct {
+                                left: Box::new(prev),
+                                right: Box::new(create),
+                            },
+                            None => create,
+                        });
+                    }
+
+                    last_alias = Some(alias);
+                    i += 1;
+                }
+                PatternElement::Relationship(rp) => {
+                    let src_alias = last_alias.clone().ok_or_else(|| {
+                        Error::PlanError("Relationship pattern without preceding node".into())
+                    })?;
+
+                    i += 1;
+                    let dst_alias = if i < pattern.elements.len() {
+                        if let PatternElement::Node(to_np) = &pattern.elements[i] {
+                            let a = to_np.alias.clone().unwrap_or_else(|| format!("_anon_{}", next_id()));
+                            if !to_np.labels.is_empty() || !to_np.properties.is_empty() {
+                                let properties: Vec<(String, Expr)> = to_np.properties.iter()
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect();
+                                let create = LogicalPlan::CreateNode {
+                                    labels: to_np.labels.clone(),
+                                    properties,
+                                    alias: a.clone(),
+                                };
+                                current = Some(match current.take() {
+                                    Some(prev) => LogicalPlan::CartesianProduct {
+                                        left: Box::new(prev),
+                                        right: Box::new(create),
+                                    },
+                                    None => create,
+                                });
+                            }
+                            i += 1;
+                            a
+                        } else {
+                            return Err(Error::PlanError("Expected node after relationship".into()));
+                        }
+                    } else {
+                        return Err(Error::PlanError("Relationship pattern must end with node".into()));
+                    };
+
+                    let rel_type = rp.rel_types.first().cloned().unwrap_or_else(|| "RELATED_TO".into());
+                    let properties: Vec<(String, Expr)> = rp.properties.iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+
+                    let (actual_src, actual_dst) = match rp.direction {
+                        PatternDirection::Left => (dst_alias.clone(), src_alias),
+                        _ => (src_alias, dst_alias.clone()),
+                    };
+
+                    let create_rel = LogicalPlan::CreateRel {
+                        input: current.take().map(Box::new),
+                        src: actual_src,
+                        dst: actual_dst,
+                        rel_type,
+                        properties,
+                    };
+                    current = Some(create_rel);
+
+                    last_alias = Some(dst_alias);
+                }
             }
         }
     }
 
-    if plans.is_empty() {
-        return Ok(LogicalPlan::Argument);
-    }
-
-    let mut current = plans.remove(0);
-    for p in plans {
-        current = LogicalPlan::CartesianProduct {
-            left: Box::new(current),
-            right: Box::new(p),
-        };
-    }
+    let mut result = current.unwrap_or(LogicalPlan::Argument);
 
     if let Some(ref ret) = c.return_clause {
         let items: Vec<(Expr, String)> = ret.items.iter().map(|item| {
             let alias = item.alias.clone().unwrap_or_else(|| expr_default_alias(&item.expr));
             (item.expr.clone(), alias)
         }).collect();
-        current = LogicalPlan::Project {
-            input: Box::new(current),
+        result = LogicalPlan::Project {
+            input: Box::new(result),
             items,
         };
     }
 
-    Ok(current)
+    Ok(result)
 }
 
 fn plan_delete(d: &DeleteClause) -> Result<LogicalPlan> {
@@ -390,6 +469,21 @@ fn plan_set(s: &SetClause) -> Result<LogicalPlan> {
 }
 
 fn plan_merge(m: &MergeClause) -> Result<LogicalPlan> {
+    // Start from MATCH clauses if present (compound MATCH...MERGE)
+    let mut input: Option<LogicalPlan> = if m.matches.is_empty() {
+        None
+    } else {
+        Some(plan_matches(&m.matches)?)
+    };
+
+    if let Some(ref where_expr) = m.where_clause {
+        let prev = input.take().unwrap_or(LogicalPlan::Argument);
+        input = Some(LogicalPlan::Filter {
+            input: Box::new(prev),
+            predicate: where_expr.clone(),
+        });
+    }
+
     // Extract the node from the MERGE pattern
     let node_pattern = m.pattern.elements.iter().find_map(|e| {
         if let PatternElement::Node(np) = e { Some(np) } else { None }
@@ -415,6 +509,11 @@ fn plan_merge(m: &MergeClause) -> Result<LogicalPlan> {
             None
         }
     }).collect();
+
+    // TODO: When input is Some, MergeNode should run once per matched row.
+    // For now, MergeNode is a standalone leaf. This handles the common case
+    // of standalone MERGE and simple MATCH...MERGE.
+    let _ = input; // will be wired when MergeNode becomes a piped operator
 
     let mut current = LogicalPlan::MergeNode {
         labels: node_pattern.labels.clone(),

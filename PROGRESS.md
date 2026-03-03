@@ -1,6 +1,6 @@
 # PROGRESS.md — Quadro Stack Implementation Status
 
-> **Last updated**: 2026-02-27
+> **Last updated**: 2026-03-03
 > **Branch**: `claude/neo4j-rust-driver-u53PD` (across all repos)
 > **Session**: https://claude.ai/code/session_01DHqTn7ocBBWfsryzKukJUv
 
@@ -251,36 +251,50 @@ cargo test --features ladybug --test e2e_ladybug
 ```
 
 ### 3. Parser Gaps (Pre-existing, Not Regressions)
-These are parser limitations that existed before this work:
 
-| Feature | Lexer | AST | Parser | Executor | Tests |
-|---------|-------|-----|--------|----------|-------|
-| `WITH` clause | - | `WithClause` | Missing | - | - |
-| `STARTS WITH` | - | `StringOp` | Missing | Exists | Ignored |
-| `ENDS WITH` | - | `StringOp` | Missing | Exists | Ignored |
-| `CONTAINS` | - | `StringOp` | Missing | Exists | Ignored |
-| `UNWIND` | Yes | `LogicalPlan::Unwind` | Missing | Exists | Ignored |
+| Feature | Lexer | AST | Parser | Executor | Tests | Status |
+|---------|-------|-----|--------|----------|-------|--------|
+| `STARTS WITH` | `StartsWith` | `StringOp` | `parse_string_op` | `eval_expr` | `test_string_starts_with` | **FIXED** |
+| `ENDS WITH` | `EndsWith` | `StringOp` | `parse_string_op` | `eval_expr` | `test_string_ends_with` | **FIXED** |
+| `CONTAINS` | `Contains` | `StringOp` | `parse_string_op` | `eval_expr` | `test_string_contains` | **FIXED** |
+| `MATCH...CREATE` | - | `CreateClause.matches` | `parse_create_after_match` | piped `CreateRel` | `e2e_compound.rs` (5) | **FIXED** |
+| `MATCH...MERGE` | - | `MergeClause.matches` | `parse_merge_after_match` | piped merge | - | **Parsed, needs exec** |
+| `WITH` clause | Yes | `WithClause` | Missing | - | - | Open |
+| `UNWIND` | Yes | `LogicalPlan::Unwind` | Missing | Exists | Ignored | Open |
 
-All 4 are marked `#[ignore]` with explanatory messages in `tests/e2e_edge_cases.rs`.
+**Fix details (STARTS WITH / ENDS WITH / CONTAINS):**
+- `CONTAINS` was a single-word keyword → added mapping in `keyword_or_ident()`
+- `STARTS WITH` / `ENDS WITH` are two-word keywords → added `merge_multiword_keywords()` post-processing pass in lexer that merges `Identifier("STARTS") + With` → `StartsWith` and `Identifier("ENDS") + With` → `EndsWith`
 
-### 4. Export Round-Trip Not Tested
-**Problem:** `export.rs` writes Cypher DUMP output, but there's no test that
-re-imports the dump into a fresh graph and verifies equivalence.
+**Fix details (MATCH...CREATE compound statements):**
+- AST: Added `matches: Vec<MatchClause>` and `where_clause: Option<Expr>` to `CreateClause` and `MergeClause`
+- Parser: Added `parse_create_after_match()` and `parse_merge_after_match()` dispatch after MATCH loop
+- Planner: Changed `CreateRel` to have `input: Option<Box<LogicalPlan>>` for piped execution
+- Executor: `CreateRel` now processes input rows; added `resolve_node_id()` helper that checks row bindings (`Value::Node`) before falling back to params
+
+### 4. Export Round-Trip — FIXED
+`tests/e2e_export_roundtrip.rs` (8 tests) verifies export format, properties, header
+counts, node reimport, empty graph, labels, and relationship endpoints.
 
 ---
 
 ## Test Summary
 
-### neo4j-rs (56 pass, 4 ignored)
+### neo4j-rs (172 pass, 1 ignored)
 ```
-tests/e2e_basic.rs       10 pass  (core CRUD + query)
-tests/e2e_write.rs       13 pass  (CREATE, SET, DELETE variants)
-tests/e2e_aggregation.rs 19 pass  (COUNT, SUM, AVG, MIN, MAX, COLLECT, DISTINCT)
-tests/e2e_traversal.rs   10 pass  (1-hop, 2-hop, bidirectional, triangle)
-tests/e2e_edge_cases.rs  14 pass  (NULL, IN, CASE, arithmetic, params, boolean)
-                          4 ignore (STARTS WITH, ENDS WITH, CONTAINS, UNWIND)
-tests/e2e_aiwar.rs        8 pass  (aiwar domain: create, query, aggregate, export)
-doctests                   1 pass
+Unit tests (lib)          87 pass  (lexer 12, parser 23, export 2, model 29, storage 8, etc.)
+tests/e2e_basic.rs        10 pass  (core CRUD + query)
+tests/e2e_write.rs        13 pass  (CREATE, SET, DELETE variants)
+tests/e2e_aggregation.rs  19 pass  (COUNT, SUM, AVG, MIN, MAX, COLLECT, DISTINCT)
+tests/e2e_traversal.rs    10 pass  (1-hop, 2-hop, bidirectional, triangle)
+tests/e2e_edge_cases.rs   17 pass  (NULL, IN, CASE, arithmetic, params, boolean,
+                                     STARTS WITH, ENDS WITH, CONTAINS)
+                            1 ignore (UNWIND)
+tests/e2e_aiwar.rs         8 pass  (aiwar domain: create, query, aggregate, export)
+tests/e2e_compound.rs      5 pass  (MATCH...CREATE relationships, WHERE filter, export roundtrip)
+tests/e2e_export_roundtrip.rs  8 pass  (format, properties, counts, reimport, labels, rels)
+tests/e2e_ladybug.rs       0 pass  (9 tests feature-gated behind #[cfg(feature = "ladybug")])
+doctests                    1 pass
 ```
 
 ### n8n-rs (50 pass)
@@ -302,15 +316,22 @@ cypher_bridge              6 pass  (parse, execute, merge, upsert)
 ### neo4j-rs
 | File | Status | Lines | Description |
 |------|--------|-------|-------------|
-| `src/cypher/parser.rs` | Modified | +375 | MERGE, CREATE/DROP INDEX/CONSTRAINT |
-| `src/planner/mod.rs` | Modified | +60 | MergeNode, SchemaOp variants + plan_merge() |
-| `src/execution/mod.rs` | Modified | +85 | MergeNode + SchemaOp execution arms |
+| `src/cypher/lexer.rs` | Modified | +40 | CONTAINS keyword, `merge_multiword_keywords()` for STARTS/ENDS WITH |
+| `src/cypher/ast.rs` | Modified | +8 | `matches`/`where_clause` fields on CreateClause and MergeClause |
+| `src/cypher/parser.rs` | Modified | +450 | MERGE, schema, compound MATCH...CREATE/MERGE dispatch |
+| `src/planner/mod.rs` | Modified | +100 | MergeNode, SchemaOp, piped CreateRel with MATCH context |
+| `src/execution/mod.rs` | Modified | +120 | MergeNode, SchemaOp, piped CreateRel, `resolve_node_id()` |
 | `src/storage/mod.rs` | Modified | +4 | Register ladybug module |
 | `src/storage/ladybug.rs` | New | ~450 | Full StorageBackend impl for LadybugBackend |
 | `src/export.rs` | New | ~100 | Cypher DUMP writer |
 | `src/lib.rs` | Modified | +15 | export module, Graph::open_ladybug/with_bind_space |
 | `tests/e2e_aiwar.rs` | New | ~220 | 8 aiwar domain tests |
+| `tests/e2e_compound.rs` | New | ~150 | 5 compound statement tests (MATCH...CREATE) |
+| `tests/e2e_export_roundtrip.rs` | New | ~230 | 8 export round-trip tests |
+| `tests/e2e_ladybug.rs` | New | ~160 | 9 ladybug tests (feature-gated) |
+| `tests/e2e_edge_cases.rs` | Modified | -9 | Removed #[ignore] from STARTS WITH, ENDS WITH, CONTAINS |
 | `extensions/quarto-ladybug/*` | New | 5 files | Quarto extension for Cypher queries |
+| `PROGRESS.md` | New | ~350 | Implementation status, architecture, known issues |
 
 ### ladybug-rs
 | File | Status | Lines | Description |
