@@ -29,6 +29,7 @@ pub enum Statement {
 pub struct Query {
     pub matches: Vec<MatchClause>,
     pub where_clause: Option<Expr>,
+    pub unwinds: Vec<(Expr, String)>,
     pub with_clauses: Vec<WithClause>,
     pub return_clause: ReturnClause,
     pub order_by: Option<Vec<OrderExpr>>,

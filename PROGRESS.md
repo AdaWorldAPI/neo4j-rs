@@ -258,9 +258,9 @@ cargo test --features ladybug --test e2e_ladybug
 | `ENDS WITH` | `EndsWith` | `StringOp` | `parse_string_op` | `eval_expr` | `test_string_ends_with` | **FIXED** |
 | `CONTAINS` | `Contains` | `StringOp` | `parse_string_op` | `eval_expr` | `test_string_contains` | **FIXED** |
 | `MATCH...CREATE` | - | `CreateClause.matches` | `parse_create_after_match` | piped `CreateRel` | `e2e_compound.rs` (5) | **FIXED** |
-| `MATCH...MERGE` | - | `MergeClause.matches` | `parse_merge_after_match` | piped merge | - | **Parsed, needs exec** |
-| `WITH` clause | Yes | `WithClause` | Missing | - | - | Open |
-| `UNWIND` | Yes | `LogicalPlan::Unwind` | Missing | Exists | Ignored | Open |
+| `MATCH...MERGE` | - | `MergeClause.matches` | `parse_merge_after_match` | piped `MergeNode` | `e2e_compound.rs` (2) | **FIXED** |
+| `UNWIND` | `Unwind` | `Query.unwinds` | `parse_query_stmt` loop | `LogicalPlan::Unwind` | `test_unwind_list` + 2 | **FIXED** |
+| `WITH` clause | Yes | `WithClause` | Parsed | Planner missing | - | Open |
 
 **Fix details (STARTS WITH / ENDS WITH / CONTAINS):**
 - `CONTAINS` was a single-word keyword → added mapping in `keyword_or_ident()`
@@ -272,6 +272,15 @@ cargo test --features ladybug --test e2e_ladybug
 - Planner: Changed `CreateRel` to have `input: Option<Box<LogicalPlan>>` for piped execution
 - Executor: `CreateRel` now processes input rows; added `resolve_node_id()` helper that checks row bindings (`Value::Node`) before falling back to params
 
+**Fix details (MATCH...MERGE piped execution):**
+- Planner: `MergeNode` now has `input: Option<Box<LogicalPlan>>` (was standalone leaf)
+- Executor: `MergeNode` iterates input rows, evaluates properties per row, preserves MATCH bindings
+
+**Fix details (UNWIND):**
+- AST: Added `unwinds: Vec<(Expr, String)>` to `Query`
+- Parser: UNWIND parsed in the clause loop alongside MATCH/WITH in `parse_query_stmt()`
+- Planner: Applies `LogicalPlan::Unwind` after matches + filter
+
 ### 4. Export Round-Trip — FIXED
 `tests/e2e_export_roundtrip.rs` (8 tests) verifies export format, properties, header
 counts, node reimport, empty graph, labels, and relationship endpoints.
@@ -280,18 +289,17 @@ counts, node reimport, empty graph, labels, and relationship endpoints.
 
 ## Test Summary
 
-### neo4j-rs (172 pass, 1 ignored)
+### neo4j-rs (177 pass, 0 ignored)
 ```
 Unit tests (lib)          87 pass  (lexer 12, parser 23, export 2, model 29, storage 8, etc.)
 tests/e2e_basic.rs        10 pass  (core CRUD + query)
 tests/e2e_write.rs        13 pass  (CREATE, SET, DELETE variants)
 tests/e2e_aggregation.rs  19 pass  (COUNT, SUM, AVG, MIN, MAX, COLLECT, DISTINCT)
 tests/e2e_traversal.rs    10 pass  (1-hop, 2-hop, bidirectional, triangle)
-tests/e2e_edge_cases.rs   17 pass  (NULL, IN, CASE, arithmetic, params, boolean,
-                                     STARTS WITH, ENDS WITH, CONTAINS)
-                            1 ignore (UNWIND)
+tests/e2e_edge_cases.rs   18 pass  (NULL, IN, CASE, arithmetic, params, boolean,
+                                     STARTS WITH, ENDS WITH, CONTAINS, UNWIND)
 tests/e2e_aiwar.rs         8 pass  (aiwar domain: create, query, aggregate, export)
-tests/e2e_compound.rs      5 pass  (MATCH...CREATE relationships, WHERE filter, export roundtrip)
+tests/e2e_compound.rs      9 pass  (MATCH...CREATE, MATCH...MERGE, UNWIND, export roundtrip)
 tests/e2e_export_roundtrip.rs  8 pass  (format, properties, counts, reimport, labels, rels)
 tests/e2e_ladybug.rs       0 pass  (9 tests feature-gated behind #[cfg(feature = "ladybug")])
 doctests                    1 pass

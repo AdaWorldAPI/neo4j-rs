@@ -133,10 +133,20 @@ pub fn parse_statement(tokens: &[Token]) -> Result<Statement> {
 fn parse_query_stmt(p: &mut Parser) -> Result<Statement> {
     let mut matches = Vec::new();
     let mut where_clause = None;
+    let mut unwinds: Vec<(Expr, String)> = Vec::new();
     let mut with_clauses: Vec<WithClause> = Vec::new();
 
-    // Parse MATCH/WITH clauses in a loop to allow interleaving
+    // Parse MATCH/WITH/UNWIND clauses in a loop to allow interleaving
     loop {
+        // Parse UNWIND clauses
+        while p.at(TokenKind::Unwind) {
+            p.advance(); // consume UNWIND
+            let expr = parse_expr(p)?;
+            p.expect(TokenKind::As)?;
+            let alias = p.advance().text.clone();
+            unwinds.push((expr, alias));
+        }
+
         // Parse MATCH clauses
         while p.at(TokenKind::Match) || p.at(TokenKind::OptionalMatch) {
             let optional = if p.at(TokenKind::OptionalMatch) {
@@ -161,12 +171,21 @@ fn parse_query_stmt(p: &mut Parser) -> Result<Statement> {
             }
         }
 
+        // Parse more UNWIND clauses (can appear after MATCH)
+        while p.at(TokenKind::Unwind) {
+            p.advance(); // consume UNWIND
+            let expr = parse_expr(p)?;
+            p.expect(TokenKind::As)?;
+            let alias = p.advance().text.clone();
+            unwinds.push((expr, alias));
+        }
+
         // Check for WITH clause
         if p.at(TokenKind::With) {
             p.advance();
             let with = parse_with_clause(p)?;
             with_clauses.push(with);
-            // After WITH, continue to parse more MATCH/WITH/RETURN clauses
+            // After WITH, continue to parse more MATCH/WITH/UNWIND/RETURN clauses
             continue;
         }
 
@@ -267,6 +286,7 @@ fn parse_query_stmt(p: &mut Parser) -> Result<Statement> {
     Ok(Statement::Query(Query {
         matches,
         where_clause,
+        unwinds,
         with_clauses,
         return_clause,
         order_by,
@@ -692,6 +712,7 @@ fn parse_call_stmt(p: &mut Parser) -> Result<Statement> {
     Ok(Statement::Query(Query {
         matches: Vec::new(),
         where_clause: None,
+        unwinds: Vec::new(),
         with_clauses: Vec::new(),
         return_clause,
         order_by: None,

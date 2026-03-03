@@ -56,6 +56,7 @@ pub enum LogicalPlan {
     RemoveLabel { input: Box<LogicalPlan>, variable: String, label: String },
     /// MERGE (upsert): match-or-create a node/pattern
     MergeNode {
+        input: Option<Box<LogicalPlan>>,
         labels: Vec<String>,
         properties: Vec<(String, Expr)>,
         alias: String,
@@ -91,6 +92,15 @@ fn plan_query(q: &Query) -> Result<LogicalPlan> {
         current = LogicalPlan::Filter {
             input: Box::new(current),
             predicate: where_expr.clone(),
+        };
+    }
+
+    // Apply UNWIND clauses
+    for (expr, alias) in &q.unwinds {
+        current = LogicalPlan::Unwind {
+            input: Box::new(current),
+            expr: expr.clone(),
+            alias: alias.clone(),
         };
     }
 
@@ -510,12 +520,8 @@ fn plan_merge(m: &MergeClause) -> Result<LogicalPlan> {
         }
     }).collect();
 
-    // TODO: When input is Some, MergeNode should run once per matched row.
-    // For now, MergeNode is a standalone leaf. This handles the common case
-    // of standalone MERGE and simple MATCH...MERGE.
-    let _ = input; // will be wired when MergeNode becomes a piped operator
-
     let mut current = LogicalPlan::MergeNode {
+        input: input.map(Box::new),
         labels: node_pattern.labels.clone(),
         properties,
         alias: alias.clone(),

@@ -567,66 +567,77 @@ fn execute_plan<'a, B: StorageBackend>(
             Ok(rows)
         }
 
-        LogicalPlan::MergeNode { labels, properties, alias, on_create, on_match } => {
+        LogicalPlan::MergeNode { input, labels, properties, alias, on_create, on_match } => {
             // MERGE = upsert: try to find a matching node, create if not found.
-            let label = labels.first().map(|l| l.as_str()).unwrap_or("Node");
-
-            // Evaluate property expressions
-            let empty_row = HashMap::new();
-            let mut prop_map = PropertyMap::new();
-            for (key, expr) in properties {
-                let val = eval_expr(expr, &empty_row, &ctx.params)?;
-                prop_map.insert(key.clone(), val);
-            }
-
-            // Search for existing node with matching label and properties
-            let existing = backend.nodes_by_label(tx, label).await?;
-            let matched = existing.into_iter().find(|n| {
-                prop_map.iter().all(|(k, v)| {
-                    n.properties.get(k).map(|nv| nv == v).unwrap_or(false)
-                })
-            });
-
-            let node = if let Some(existing_node) = matched {
-                // ON MATCH SET
-                for (var, key, expr) in on_match {
-                    if var == alias {
-                        let val = eval_expr(expr, &empty_row, &ctx.params)?;
-                        backend.set_node_property(tx, existing_node.id, key, val).await?;
-                        ctx.stats.properties_set += 1;
-                    }
-                }
-                existing_node
+            // When input is provided (MATCH...MERGE), run once per matched row.
+            let input_rows = if let Some(input_plan) = input {
+                execute_plan(backend, tx, input_plan, ctx).await?
             } else {
-                // Create new node
-                let label_refs: Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
-                let id = backend.create_node(tx, &label_refs, prop_map).await?;
-                ctx.stats.nodes_created += 1;
-                ctx.stats.properties_set += properties.len() as u64;
-
-                // ON CREATE SET
-                for (var, key, expr) in on_create {
-                    if var == alias {
-                        let val = eval_expr(expr, &empty_row, &ctx.params)?;
-                        backend.set_node_property(tx, id, key, val).await?;
-                        ctx.stats.properties_set += 1;
-                    }
-                }
-
-                backend.get_node(tx, id).await?.unwrap_or_else(|| Node {
-                    id,
-                    element_id: None,
-                    labels: labels.clone(),
-                    properties: PropertyMap::new(),
-                })
+                vec![HashMap::new()]
             };
 
-            let mut row = HashMap::new();
-            row.insert(alias.clone(), Value::Node(Box::new(node)));
+            let label = labels.first().map(|l| l.as_str()).unwrap_or("Node");
+            let mut result_rows = Vec::new();
+
+            for row in &input_rows {
+                // Evaluate property expressions against the current row
+                let mut prop_map = PropertyMap::new();
+                for (key, expr) in properties {
+                    let val = eval_expr(expr, row, &ctx.params)?;
+                    prop_map.insert(key.clone(), val);
+                }
+
+                // Search for existing node with matching label and properties
+                let existing = backend.nodes_by_label(tx, label).await?;
+                let matched = existing.into_iter().find(|n| {
+                    prop_map.iter().all(|(k, v)| {
+                        n.properties.get(k).map(|nv| nv == v).unwrap_or(false)
+                    })
+                });
+
+                let node = if let Some(existing_node) = matched {
+                    // ON MATCH SET
+                    for (var, key, expr) in on_match {
+                        if var == alias {
+                            let val = eval_expr(expr, row, &ctx.params)?;
+                            backend.set_node_property(tx, existing_node.id, key, val).await?;
+                            ctx.stats.properties_set += 1;
+                        }
+                    }
+                    existing_node
+                } else {
+                    // Create new node
+                    let label_refs: Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
+                    let id = backend.create_node(tx, &label_refs, prop_map).await?;
+                    ctx.stats.nodes_created += 1;
+                    ctx.stats.properties_set += properties.len() as u64;
+
+                    // ON CREATE SET
+                    for (var, key, expr) in on_create {
+                        if var == alias {
+                            let val = eval_expr(expr, row, &ctx.params)?;
+                            backend.set_node_property(tx, id, key, val).await?;
+                            ctx.stats.properties_set += 1;
+                        }
+                    }
+
+                    backend.get_node(tx, id).await?.unwrap_or_else(|| Node {
+                        id,
+                        element_id: None,
+                        labels: labels.clone(),
+                        properties: PropertyMap::new(),
+                    })
+                };
+
+                let mut new_row = row.clone();
+                new_row.insert(alias.clone(), Value::Node(Box::new(node)));
+                result_rows.push(new_row);
+            }
+
             if !ctx.columns.contains(alias) {
                 ctx.columns.push(alias.clone());
             }
-            Ok(vec![row])
+            Ok(result_rows)
         }
 
         LogicalPlan::SchemaOp(cmd) => {

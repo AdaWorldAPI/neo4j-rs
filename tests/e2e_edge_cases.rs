@@ -516,8 +516,6 @@ async fn test_not_expression() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "UNWIND is recognized by the lexer and appears in LogicalPlan and executor, \
-            but the parser does not yet handle UNWIND as a clause within query statements."]
 async fn test_unwind_list() {
     let graph = Graph::open_memory().await.unwrap();
 

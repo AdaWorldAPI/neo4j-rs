@@ -151,3 +151,72 @@ async fn test_export_full_roundtrip_with_relationships() {
     ).await.unwrap();
     assert_eq!(result.rows[0].get::<i64>("cnt").unwrap(), 2, "Should have 2 nodes");
 }
+
+#[tokio::test]
+async fn test_match_merge_creates_when_missing() {
+    let graph = Graph::open_memory().await.unwrap();
+
+    // Create a person
+    graph.mutate("CREATE (n:Person {name: 'Alice'})", PropertyMap::new()).await.unwrap();
+
+    // MATCH...MERGE: merge a new node that doesn't exist yet
+    graph.mutate(
+        "MATCH (a:Person) WHERE a.name = 'Alice' MERGE (b:Tag {name: 'developer'})",
+        PropertyMap::new(),
+    ).await.unwrap();
+
+    // Verify the Tag was created
+    let result = graph.execute(
+        "MATCH (t:Tag) RETURN t.name",
+        PropertyMap::new(),
+    ).await.unwrap();
+
+    assert_eq!(result.rows.len(), 1, "Tag should have been created");
+    assert_eq!(result.rows[0].get::<String>("t.name").unwrap(), "developer");
+}
+
+#[tokio::test]
+async fn test_merge_idempotent() {
+    let graph = Graph::open_memory().await.unwrap();
+
+    // MERGE twice — should only create one node
+    graph.mutate("MERGE (n:City {name: 'Berlin'})", PropertyMap::new()).await.unwrap();
+    graph.mutate("MERGE (n:City {name: 'Berlin'})", PropertyMap::new()).await.unwrap();
+
+    let result = graph.execute(
+        "MATCH (c:City) RETURN count(c) AS cnt",
+        PropertyMap::new(),
+    ).await.unwrap();
+
+    assert_eq!(result.rows[0].get::<i64>("cnt").unwrap(), 1, "MERGE should be idempotent");
+}
+
+#[tokio::test]
+async fn test_unwind_with_create() {
+    let graph = Graph::open_memory().await.unwrap();
+
+    // UNWIND a list and create nodes from it
+    let result = graph.execute(
+        "UNWIND [1, 2, 3, 4, 5] AS x RETURN x",
+        PropertyMap::new(),
+    ).await.unwrap();
+
+    assert_eq!(result.rows.len(), 5, "UNWIND should produce 5 rows");
+}
+
+#[tokio::test]
+async fn test_unwind_with_match() {
+    let graph = Graph::open_memory().await.unwrap();
+
+    // Create nodes with list properties
+    graph.mutate("CREATE (n:Person {name: 'Alice'})", PropertyMap::new()).await.unwrap();
+    graph.mutate("CREATE (n:Person {name: 'Bob'})", PropertyMap::new()).await.unwrap();
+
+    // Simple UNWIND at start, followed by RETURN
+    let result = graph.execute(
+        "UNWIND ['hello', 'world'] AS word RETURN word",
+        PropertyMap::new(),
+    ).await.unwrap();
+
+    assert_eq!(result.rows.len(), 2, "UNWIND should produce 2 rows");
+}
