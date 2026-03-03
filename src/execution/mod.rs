@@ -344,29 +344,38 @@ fn execute_plan<'a, B: StorageBackend>(
             Ok(vec![row])
         }
 
-        LogicalPlan::CreateRel { src, dst, rel_type, properties } => {
-            // src and dst are aliases that must be resolved from a preceding pipeline
-            // For standalone CREATE ()-[r:T]->(), we need the node IDs
-            // This simplified version expects src/dst to be node IDs encoded in params
-            let empty_row = HashMap::new();
-            let mut props = PropertyMap::new();
-            for (key, expr) in properties {
-                let val = eval_expr(expr, &empty_row, &ctx.params)?;
-                props.insert(key.clone(), val);
-            }
-            // For now, src/dst must be numeric params
-            let src_id = ctx.params.get(src)
-                .and_then(|v| v.as_int())
-                .map(|i| NodeId(i as u64))
-                .ok_or_else(|| Error::ExecutionError(format!("Cannot resolve source node '{src}'")))?;
-            let dst_id = ctx.params.get(dst)
-                .and_then(|v| v.as_int())
-                .map(|i| NodeId(i as u64))
-                .ok_or_else(|| Error::ExecutionError(format!("Cannot resolve target node '{dst}'")))?;
+        LogicalPlan::CreateRel { input, src, dst, rel_type, properties } => {
+            // Get input rows (from MATCH pipeline or preceding CreateNode)
+            let input_rows = if let Some(input_plan) = input {
+                execute_plan(backend, tx, input_plan, ctx).await?
+            } else {
+                vec![HashMap::new()]
+            };
 
-            backend.create_relationship(tx, src_id, dst_id, rel_type, props).await?;
-            ctx.stats.relationships_created += 1;
-            Ok(vec![HashMap::new()])
+            let mut result_rows = Vec::new();
+            for row in &input_rows {
+                let mut props = PropertyMap::new();
+                for (key, expr) in properties {
+                    let val = eval_expr(expr, row, &ctx.params)?;
+                    props.insert(key.clone(), val);
+                }
+
+                // Resolve src/dst from row bindings (Value::Node) or params fallback
+                let src_id = resolve_node_id(src, row, &ctx.params)
+                    .ok_or_else(|| Error::ExecutionError(
+                        format!("Cannot resolve source node '{}'. Ensure it is bound by MATCH or CREATE.", src)
+                    ))?;
+                let dst_id = resolve_node_id(dst, row, &ctx.params)
+                    .ok_or_else(|| Error::ExecutionError(
+                        format!("Cannot resolve target node '{}'. Ensure it is bound by MATCH or CREATE.", dst)
+                    ))?;
+
+                backend.create_relationship(tx, src_id, dst_id, rel_type, props).await?;
+                ctx.stats.relationships_created += 1;
+                result_rows.push(row.clone());
+            }
+
+            Ok(result_rows)
         }
 
         LogicalPlan::Limit { input, count } => {
@@ -558,66 +567,77 @@ fn execute_plan<'a, B: StorageBackend>(
             Ok(rows)
         }
 
-        LogicalPlan::MergeNode { labels, properties, alias, on_create, on_match } => {
+        LogicalPlan::MergeNode { input, labels, properties, alias, on_create, on_match } => {
             // MERGE = upsert: try to find a matching node, create if not found.
-            let label = labels.first().map(|l| l.as_str()).unwrap_or("Node");
-
-            // Evaluate property expressions
-            let empty_row = HashMap::new();
-            let mut prop_map = PropertyMap::new();
-            for (key, expr) in properties {
-                let val = eval_expr(expr, &empty_row, &ctx.params)?;
-                prop_map.insert(key.clone(), val);
-            }
-
-            // Search for existing node with matching label and properties
-            let existing = backend.nodes_by_label(tx, label).await?;
-            let matched = existing.into_iter().find(|n| {
-                prop_map.iter().all(|(k, v)| {
-                    n.properties.get(k).map(|nv| nv == v).unwrap_or(false)
-                })
-            });
-
-            let node = if let Some(existing_node) = matched {
-                // ON MATCH SET
-                for (var, key, expr) in on_match {
-                    if var == alias {
-                        let val = eval_expr(expr, &empty_row, &ctx.params)?;
-                        backend.set_node_property(tx, existing_node.id, key, val).await?;
-                        ctx.stats.properties_set += 1;
-                    }
-                }
-                existing_node
+            // When input is provided (MATCH...MERGE), run once per matched row.
+            let input_rows = if let Some(input_plan) = input {
+                execute_plan(backend, tx, input_plan, ctx).await?
             } else {
-                // Create new node
-                let label_refs: Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
-                let id = backend.create_node(tx, &label_refs, prop_map).await?;
-                ctx.stats.nodes_created += 1;
-                ctx.stats.properties_set += properties.len() as u64;
-
-                // ON CREATE SET
-                for (var, key, expr) in on_create {
-                    if var == alias {
-                        let val = eval_expr(expr, &empty_row, &ctx.params)?;
-                        backend.set_node_property(tx, id, key, val).await?;
-                        ctx.stats.properties_set += 1;
-                    }
-                }
-
-                backend.get_node(tx, id).await?.unwrap_or_else(|| Node {
-                    id,
-                    element_id: None,
-                    labels: labels.clone(),
-                    properties: PropertyMap::new(),
-                })
+                vec![HashMap::new()]
             };
 
-            let mut row = HashMap::new();
-            row.insert(alias.clone(), Value::Node(Box::new(node)));
+            let label = labels.first().map(|l| l.as_str()).unwrap_or("Node");
+            let mut result_rows = Vec::new();
+
+            for row in &input_rows {
+                // Evaluate property expressions against the current row
+                let mut prop_map = PropertyMap::new();
+                for (key, expr) in properties {
+                    let val = eval_expr(expr, row, &ctx.params)?;
+                    prop_map.insert(key.clone(), val);
+                }
+
+                // Search for existing node with matching label and properties
+                let existing = backend.nodes_by_label(tx, label).await?;
+                let matched = existing.into_iter().find(|n| {
+                    prop_map.iter().all(|(k, v)| {
+                        n.properties.get(k).map(|nv| nv == v).unwrap_or(false)
+                    })
+                });
+
+                let node = if let Some(existing_node) = matched {
+                    // ON MATCH SET
+                    for (var, key, expr) in on_match {
+                        if var == alias {
+                            let val = eval_expr(expr, row, &ctx.params)?;
+                            backend.set_node_property(tx, existing_node.id, key, val).await?;
+                            ctx.stats.properties_set += 1;
+                        }
+                    }
+                    existing_node
+                } else {
+                    // Create new node
+                    let label_refs: Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
+                    let id = backend.create_node(tx, &label_refs, prop_map).await?;
+                    ctx.stats.nodes_created += 1;
+                    ctx.stats.properties_set += properties.len() as u64;
+
+                    // ON CREATE SET
+                    for (var, key, expr) in on_create {
+                        if var == alias {
+                            let val = eval_expr(expr, row, &ctx.params)?;
+                            backend.set_node_property(tx, id, key, val).await?;
+                            ctx.stats.properties_set += 1;
+                        }
+                    }
+
+                    backend.get_node(tx, id).await?.unwrap_or_else(|| Node {
+                        id,
+                        element_id: None,
+                        labels: labels.clone(),
+                        properties: PropertyMap::new(),
+                    })
+                };
+
+                let mut new_row = row.clone();
+                new_row.insert(alias.clone(), Value::Node(Box::new(node)));
+                result_rows.push(new_row);
+            }
+
             if !ctx.columns.contains(alias) {
                 ctx.columns.push(alias.clone());
             }
-            Ok(vec![row])
+            Ok(result_rows)
         }
 
         LogicalPlan::SchemaOp(cmd) => {
@@ -648,6 +668,22 @@ fn execute_plan<'a, B: StorageBackend>(
 }
 
 // ============================================================================
+/// Resolve a node alias to a NodeId from row bindings or params.
+/// Checks: 1. Row binding (Value::Node), 2. Params (Value::Int as NodeId)
+fn resolve_node_id(alias: &str, row: &Row, params: &PropertyMap) -> Option<NodeId> {
+    // Try row binding first (from MATCH or CreateNode)
+    if let Some(Value::Node(n)) = row.get(alias) {
+        return Some(n.id);
+    }
+    // Fall back to params (legacy: MATCH (a {_id: N}) passes N as param)
+    if let Some(val) = params.get(alias) {
+        if let Some(i) = val.as_int() {
+            return Some(NodeId(i as u64));
+        }
+    }
+    None
+}
+
 // Expression evaluator
 // ============================================================================
 
