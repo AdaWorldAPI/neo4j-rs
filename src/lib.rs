@@ -232,8 +232,13 @@ pub enum Error {
     #[error("Type error: expected {expected}, got {got}")]
     TypeError { expected: String, got: String },
 
-    #[error("Planning error: {0}")]
-    PlanError(String),
+    #[error("Planning error at {file}:{line}:{col}: {message}")]
+    PlanError {
+        message: String,
+        file: &'static str,
+        line: u32,
+        col: u32,
+    },
 
     #[error("Execution error: {0}")]
     ExecutionError(String),
@@ -255,3 +260,48 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Create a `PlanError` with zero-cost compile-time location capture.
+///
+/// Uses `file!()`, `line!()`, `column!()` — resolved at macro expansion site.
+/// Zero runtime overhead: the compiler bakes the location as string/integer constants.
+///
+/// Usage: `return Err(plan_err!("Relationship pattern without preceding node"))`
+#[macro_export]
+macro_rules! plan_err {
+    ($($arg:tt)*) => {
+        $crate::Error::PlanError {
+            message: format!($($arg)*),
+            file: file!(),
+            line: line!(),
+            col: column!(),
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_plan_err_location() {
+        let err = plan_err!("test error: {}", 42);
+        match err {
+            Error::PlanError { message, file, line, col } => {
+                assert_eq!(message, "test error: 42");
+                assert!(file.contains("lib.rs"), "file should contain lib.rs, got: {}", file);
+                assert!(line > 0, "line should be non-zero");
+                assert!(col > 0, "col should be non-zero");
+            }
+            other => panic!("Expected PlanError, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_plan_err_display() {
+        let err = plan_err!("bad pattern");
+        let display = format!("{}", err);
+        assert!(display.contains("bad pattern"), "display: {}", display);
+        assert!(display.contains("lib.rs"), "display should contain file: {}", display);
+    }
+}
