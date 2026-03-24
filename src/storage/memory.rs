@@ -121,16 +121,18 @@ impl StorageBackend for MemoryBackend {
             properties: props,
         };
 
-        // Update label index
-        {
-            let mut idx = self.inner.label_index.write();
-            for label in &node.labels {
-                idx.entry(label.clone()).or_default().push(id);
-            }
-        }
+        // BUNDLE: acquire all locks before any mutation so concurrent
+        // readers never see partial state (node without index, or
+        // index without adjacency entry).
+        let mut idx = self.inner.label_index.write();
+        let mut nodes = self.inner.nodes.write();
+        let mut adj = self.inner.adjacency.write();
 
-        self.inner.nodes.write().insert(id, node);
-        self.inner.adjacency.write().insert(id, Vec::new());
+        for label in &node.labels {
+            idx.entry(label.clone()).or_default().push(id);
+        }
+        nodes.insert(id, node);
+        adj.insert(id, Vec::new());
 
         Ok(id)
     }
@@ -140,23 +142,26 @@ impl StorageBackend for MemoryBackend {
     }
 
     async fn delete_node(&self, _tx: &mut MemoryTx, id: NodeId) -> Result<bool> {
+        // BUNDLE: acquire all locks before any mutation.
+        // Prevents race where adjacency check passes but concurrent
+        // create_relationship adds an edge before we remove the node.
+        let mut adj = self.inner.adjacency.write();
+        let mut nodes = self.inner.nodes.write();
+        let mut idx = self.inner.label_index.write();
+
         // Check for existing relationships (Neo4j semantics: can't delete connected node)
-        {
-            let adj = self.inner.adjacency.read();
-            if let Some(rels) = adj.get(&id) {
-                if !rels.is_empty() {
-                    return Err(Error::ConstraintViolation(
-                        format!("Cannot delete node {id} with {} relationships. Delete relationships first.", rels.len())
-                    ));
-                }
+        if let Some(rels) = adj.get(&id) {
+            if !rels.is_empty() {
+                return Err(Error::ConstraintViolation(
+                    format!("Cannot delete node {id} with {} relationships. Delete relationships first.", rels.len())
+                ));
             }
         }
 
-        let removed = self.inner.nodes.write().remove(&id);
-        self.inner.adjacency.write().remove(&id);
+        let removed = nodes.remove(&id);
+        adj.remove(&id);
 
         if let Some(node) = &removed {
-            let mut idx = self.inner.label_index.write();
             for label in &node.labels {
                 if let Some(ids) = idx.get_mut(label) {
                     ids.retain(|nid| *nid != id);
@@ -193,22 +198,25 @@ impl StorageBackend for MemoryBackend {
     }
 
     async fn add_label(&self, _tx: &mut MemoryTx, id: NodeId, label: &str) -> Result<()> {
+        // BUNDLE: acquire both locks before any mutation to prevent
+        // concurrent readers seeing node with label but missing index entry.
         let mut nodes = self.inner.nodes.write();
+        let mut idx = self.inner.label_index.write();
         let node = nodes.get_mut(&id).ok_or_else(|| Error::NotFound(format!("Node {id}")))?;
         if !node.labels.contains(&label.to_string()) {
             node.labels.push(label.to_string());
-            drop(nodes);
-            self.inner.label_index.write().entry(label.to_string()).or_default().push(id);
+            idx.entry(label.to_string()).or_default().push(id);
         }
         Ok(())
     }
 
     async fn remove_label(&self, _tx: &mut MemoryTx, id: NodeId, label: &str) -> Result<()> {
+        // BUNDLE: acquire both locks atomically — no gap between
+        // node mutation and index cleanup.
         let mut nodes = self.inner.nodes.write();
+        let mut idx = self.inner.label_index.write();
         let node = nodes.get_mut(&id).ok_or_else(|| Error::NotFound(format!("Node {id}")))?;
         node.labels.retain(|l| l != label);
-        drop(nodes);
-        let mut idx = self.inner.label_index.write();
         if let Some(ids) = idx.get_mut(label) {
             ids.retain(|nid| *nid != id);
         }
@@ -227,15 +235,18 @@ impl StorageBackend for MemoryBackend {
         rel_type: &str,
         props: PropertyMap,
     ) -> Result<RelId> {
-        // Verify both nodes exist
-        {
-            let nodes = self.inner.nodes.read();
-            if !nodes.contains_key(&src) {
-                return Err(Error::NotFound(format!("Source node {src}")));
-            }
-            if !nodes.contains_key(&dst) {
-                return Err(Error::NotFound(format!("Target node {dst}")));
-            }
+        // BUNDLE: acquire all three locks before any mutation.
+        // Prevents race where concurrent delete on src/dst between
+        // validation and adjacency insert creates orphaned entries.
+        let nodes = self.inner.nodes.read();
+        let mut rels = self.inner.relationships.write();
+        let mut adj = self.inner.adjacency.write();
+
+        if !nodes.contains_key(&src) {
+            return Err(Error::NotFound(format!("Source node {src}")));
+        }
+        if !nodes.contains_key(&dst) {
+            return Err(Error::NotFound(format!("Target node {dst}")));
         }
 
         let id = RelId(self.inner.next_rel_id.fetch_add(1, Ordering::Relaxed));
@@ -248,10 +259,7 @@ impl StorageBackend for MemoryBackend {
             properties: props,
         };
 
-        self.inner.relationships.write().insert(id, rel);
-
-        // Update adjacency for both endpoints
-        let mut adj = self.inner.adjacency.write();
+        rels.insert(id, rel);
         adj.entry(src).or_default().push(id);
         if src != dst {
             adj.entry(dst).or_default().push(id);

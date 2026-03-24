@@ -247,17 +247,28 @@ impl StorageBackend for LadybugBackend {
         key: String,
         value: Value,
     ) -> Result<()> {
-        let mut bs = self.bs.write();
         let addr = addr_from_node_id(id);
 
-        if let Some(node) = bs.read_mut(addr) {
-            let mut props: HashMap<String, serde_json::Value> = node.payload
-                .as_ref()
-                .and_then(|p| serde_json::from_slice(p).ok())
-                .unwrap_or_default();
+        // Stage 1: read + deserialize under read lock (no blocking writers long)
+        let old_payload = {
+            let bs = self.bs.read();
+            let node = bs.read(addr)
+                .ok_or_else(|| Error::NotFound(format!("Node {:?}", id)))?;
+            node.payload.clone()
+        };
 
-            props.insert(key, value_to_json(&value));
-            node.payload = Some(serde_json::to_vec(&props).unwrap_or_default());
+        // Stage 2: compute new payload outside any lock (serde is the slow part)
+        let mut props: HashMap<String, serde_json::Value> = old_payload
+            .as_ref()
+            .and_then(|p| serde_json::from_slice(p).ok())
+            .unwrap_or_default();
+        props.insert(key, value_to_json(&value));
+        let new_payload = serde_json::to_vec(&props).unwrap_or_default();
+
+        // Stage 3: gated write-back (single assignment under write lock)
+        let mut bs = self.bs.write();
+        if let Some(node) = bs.read_mut(addr) {
+            node.payload = Some(new_payload);
             Ok(())
         } else {
             Err(Error::NotFound(format!("Node {:?}", id)))
@@ -270,17 +281,28 @@ impl StorageBackend for LadybugBackend {
         id: NodeId,
         key: String,
     ) -> Result<()> {
-        let mut bs = self.bs.write();
         let addr = addr_from_node_id(id);
 
-        if let Some(node) = bs.read_mut(addr) {
-            let mut props: HashMap<String, serde_json::Value> = node.payload
-                .as_ref()
-                .and_then(|p| serde_json::from_slice(p).ok())
-                .unwrap_or_default();
+        // Stage 1: read under read lock
+        let old_payload = {
+            let bs = self.bs.read();
+            let node = bs.read(addr)
+                .ok_or_else(|| Error::NotFound(format!("Node {:?}", id)))?;
+            node.payload.clone()
+        };
 
-            props.remove(&key);
-            node.payload = Some(serde_json::to_vec(&props).unwrap_or_default());
+        // Stage 2: compute outside lock
+        let mut props: HashMap<String, serde_json::Value> = old_payload
+            .as_ref()
+            .and_then(|p| serde_json::from_slice(p).ok())
+            .unwrap_or_default();
+        props.remove(&key);
+        let new_payload = serde_json::to_vec(&props).unwrap_or_default();
+
+        // Stage 3: gated write-back
+        let mut bs = self.bs.write();
+        if let Some(node) = bs.read_mut(addr) {
+            node.payload = Some(new_payload);
             Ok(())
         } else {
             Err(Error::NotFound(format!("Node {:?}", id)))
