@@ -59,6 +59,51 @@ async fn main() -> neo4j_rs::Result<()> {
 }
 ```
 
+## Feature Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `bolt` | off | Neo4j Bolt wire protocol client |
+| `ladybug` | off | ladybug-rs storage backend (Hamming-accelerated) |
+| `ladybug-contract` | off | CogRecord8K types for Hamming queries |
+| `arrow-results` | off | Stream results as Arrow RecordBatch |
+| `chess` | off | Chess game analysis procedures |
+| `full` | off | All features except chess |
+
+## Module Structure
+
+```
+src/
+├── cypher/          # openCypher parser (lexer → AST → parser) — pure functions, zero I/O
+├── planner/         # Logical plan generation (backend-agnostic)
+├── execution/       # Plan executor against StorageBackend trait
+├── storage/         # Pluggable backends (memory, Bolt, ladybug-rs)
+├── model/           # Core DTOs: Node, Relationship, Value, Path, PropertyMap
+├── index/           # Graph indexing
+├── tx/              # Transaction management
+├── export.rs        # Graph import/export
+├── aiwar.rs         # AI War Cloud graph procedures
+└── chess.rs         # Chess analysis procedures
+tests/
+├── e2e_basic.rs     # CRUD operations
+├── e2e_write.rs     # Write/mutation tests
+├── e2e_traversal.rs # Graph traversal patterns
+├── e2e_aggregation.rs # COUNT, SUM, AVG, etc.
+├── e2e_compound.rs  # Complex multi-clause queries
+├── e2e_edge_cases.rs # NULL semantics, empty graphs, etc.
+├── e2e_aiwar.rs     # AI War graph integration
+├── e2e_ladybug.rs   # Ladybug backend tests
+└── e2e_export_roundtrip.rs  # Export/import fidelity
+```
+
+## Testing
+
+```bash
+cargo test                    # Default (memory backend)
+cargo test --all-features     # All backends
+cargo test --test e2e_basic   # Specific test suite
+```
+
 ## Contributing
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full development guide —
@@ -66,7 +111,7 @@ prerequisites, building, testing, module walkthrough, and coding conventions.
 
 ## Reference
 
-This is a clean-room reimplementation referencing:
+Clean-room reimplementation referencing:
 - [AdaWorldAPI/neo4j](https://github.com/AdaWorldAPI/neo4j) — Neo4j 5.26.0 Java source (authoritative reference)
 - [openCypher](https://opencypher.org/) — Cypher language specification
 
@@ -76,7 +121,8 @@ This is a clean-room reimplementation referencing:
 |-------|------|
 | [holograph](https://github.com/AdaWorldAPI/holograph) | Bitpacked vector primitives (Hamming, GraphBLAS, HDR cascade) |
 | [ladybug-rs](https://github.com/AdaWorldAPI/ladybug-rs) | Hamming-accelerated storage engine (16K fingerprints, LanceDB, DataFusion) |
-| **neo4j-rs** | Property graph interface (Cypher, transactions, pluggable storage) |
+| [aiwar-neo4j-harvest](https://github.com/AdaWorldAPI/aiwar-neo4j-harvest) | Graph pattern harvester for AI War Cloud dataset |
+| [q2](https://github.com/AdaWorldAPI/q2) | Quarto 2 — graph notebook integration |
 
 ## License
 

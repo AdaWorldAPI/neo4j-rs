@@ -468,10 +468,23 @@ pub struct ResonanceEdge {
 ///
 /// Containers can be loaded (in-memory) or deferred (in LanceDB).
 /// Deferred containers are loaded on first access — O(1) per edge.
+///
+/// # Ownership tiers
+///
+/// - **SIMD hot reads**: use `LoadedIdx` → index into a shared `Arc<Vec<[u64; 256]>>`
+///   container pool. Zero-copy, Copy-friendly, no heap per edge.
+/// - **Reasoning**: `LoadedIdx(u32)` and `Deferred { rel_id, slot }` are both
+///   small enough that passing by value never triggers clone overhead.
+/// - **Write-back**: mutating a container goes through the pool, not raw `=`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ContainerRef {
     /// Container data is loaded in memory (256 × u64 = 16,384 bits).
+    /// Use for deserialization compatibility only. Hot paths should
+    /// prefer `LoadedIdx` to avoid cloning 2 KB per edge.
     Loaded(Vec<u64>),
+    /// Copy-friendly index into a thread-local or Arc-shared container pool.
+    /// The pool owns the 256×u64 buffers; edges carry only a u32 index.
+    LoadedIdx(u32),
     /// Container is in LanceDB, identified by relationship ID + slot.
     Deferred {
         rel_id: super::RelId,
