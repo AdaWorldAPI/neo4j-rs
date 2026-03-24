@@ -23,6 +23,8 @@ pub use awareness::{
     AwarenessState, AwarenessTensor, AwarenessMask, AwarenessFilter,
     CausalDirection, CausalPath, PerspectiveGestalt,
     ResonanceEdge, ContainerRef, SpoSlot,
+    TruthValue, InferredEdge, InferenceType,
+    nars_deduction, nars_abduction, nars_induction,
 };
 pub use bf16_distance::{
     Bf16Distance, LayerCounts, SpoDistance,

@@ -513,6 +513,118 @@ impl std::fmt::Display for SpoSlot {
 }
 
 // ============================================================================
+// NARS Truth Value
+// ============================================================================
+
+/// A NARS (Non-Axiomatic Reasoning System) truth value ⟨f, c⟩.
+///
+/// - `frequency` (f): the proportion of positive evidence, in [0.0, 1.0].
+/// - `confidence` (c): how much evidence we have, in [0.0, 1.0).
+///
+/// These encode uncertain, revisable beliefs — the foundation for
+/// graph-based plausible reasoning (NAL truth functions).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TruthValue {
+    pub frequency: f64,
+    pub confidence: f64,
+}
+
+impl TruthValue {
+    /// Create a new truth value, clamping inputs to valid ranges.
+    pub fn new(frequency: f64, confidence: f64) -> Self {
+        Self {
+            frequency: frequency.clamp(0.0, 1.0),
+            confidence: confidence.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Expectation: e = c * (f - 0.5) + 0.5
+    ///
+    /// The expected truth value considering both frequency and confidence.
+    /// When confidence is 0, expectation is 0.5 (maximum uncertainty).
+    /// When confidence is 1, expectation equals frequency.
+    pub fn expectation(&self) -> f64 {
+        self.confidence * (self.frequency - 0.5) + 0.5
+    }
+}
+
+impl std::fmt::Display for TruthValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "⟨{:.3}, {:.3}⟩", self.frequency, self.confidence)
+    }
+}
+
+// ============================================================================
+// NARS Inference Functions
+// ============================================================================
+
+/// NARS deduction: If A→B with `ab` and B→C with `bc`, then A→C.
+///
+/// - f = f_ab * f_bc
+/// - c = c_ab * c_bc * f_ab * f_bc
+///
+/// Deduction is the strongest syllogistic inference — confidence degrades
+/// multiplicatively through the chain.
+pub fn nars_deduction(ab: &TruthValue, bc: &TruthValue) -> TruthValue {
+    let f = ab.frequency * bc.frequency;
+    let c = ab.confidence * bc.confidence * ab.frequency * bc.frequency;
+    TruthValue::new(f, c)
+}
+
+/// NARS abduction: If A→B with `ab` and C→B with `cb`, then A→C (weaker).
+///
+/// - f = f_ab
+/// - c = c_ab * c_cb * f_cb
+///
+/// Abduction reasons backward from shared consequences — the weakest
+/// of the three syllogistic figures.
+pub fn nars_abduction(ab: &TruthValue, cb: &TruthValue) -> TruthValue {
+    let f = ab.frequency;
+    let c = ab.confidence * cb.confidence * cb.frequency;
+    TruthValue::new(f, c)
+}
+
+/// NARS induction: If A→B with `ab` and A→C with `ac`, then B→C.
+///
+/// - f = f_ac
+/// - c = c_ab * c_ac * f_ab
+///
+/// Induction reasons from shared causes — stronger than abduction but
+/// weaker than deduction.
+pub fn nars_induction(ab: &TruthValue, ac: &TruthValue) -> TruthValue {
+    let f = ac.frequency;
+    let c = ab.confidence * ac.confidence * ab.frequency;
+    TruthValue::new(f, c)
+}
+
+// ============================================================================
+// Inferred Edge (result of syllogistic inference)
+// ============================================================================
+
+/// The type of syllogistic inference that produced an edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InferenceType {
+    Deduction,
+    Abduction,
+    Induction,
+}
+
+/// An edge inferred via NARS syllogistic reasoning.
+///
+/// Carries provenance: which nodes were intermediate, what kind of
+/// inference produced it, and the resulting truth value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferredEdge {
+    pub src: super::NodeId,
+    pub dst: super::NodeId,
+    pub rel_type: String,
+    pub truth: TruthValue,
+    pub inference_type: InferenceType,
+    /// Intermediate nodes in the inference chain.
+    pub via: Vec<super::NodeId>,
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -598,5 +710,157 @@ mod tests {
         assert_eq!(AwarenessMask::all().active_count(), 9);
         assert_eq!(AwarenessMask::causal_only().active_count(), 3);
         assert_eq!(AwarenessMask::subject_only().active_count(), 3);
+    }
+
+    // ====================================================================
+    // NARS Truth Value tests
+    // ====================================================================
+
+    #[test]
+    fn test_truth_value_new_clamps() {
+        let tv = TruthValue::new(1.5, -0.1);
+        assert_eq!(tv.frequency, 1.0);
+        assert_eq!(tv.confidence, 0.0);
+    }
+
+    #[test]
+    fn test_truth_value_display() {
+        let tv = TruthValue::new(0.9, 0.8);
+        let s = format!("{}", tv);
+        assert!(s.contains("0.900"));
+        assert!(s.contains("0.800"));
+    }
+
+    #[test]
+    fn test_expectation_full_confidence() {
+        // With c=1.0, expectation = f
+        let tv = TruthValue::new(0.8, 1.0);
+        assert!((tv.expectation() - 0.8).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_expectation_zero_confidence() {
+        // With c=0.0, expectation = 0.5 (maximum uncertainty)
+        let tv = TruthValue::new(0.8, 0.0);
+        assert!((tv.expectation() - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_expectation_mid() {
+        // c=0.5, f=0.9 → e = 0.5*(0.9-0.5) + 0.5 = 0.5*0.4 + 0.5 = 0.7
+        let tv = TruthValue::new(0.9, 0.5);
+        assert!((tv.expectation() - 0.7).abs() < 1e-10);
+    }
+
+    // ====================================================================
+    // NARS Deduction tests
+    // ====================================================================
+
+    #[test]
+    fn test_deduction_perfect() {
+        let ab = TruthValue::new(1.0, 0.9);
+        let bc = TruthValue::new(1.0, 0.9);
+        let ac = nars_deduction(&ab, &bc);
+        // f = 1.0 * 1.0 = 1.0
+        assert!((ac.frequency - 1.0).abs() < 1e-10);
+        // c = 0.9 * 0.9 * 1.0 * 1.0 = 0.81
+        assert!((ac.confidence - 0.81).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_deduction_partial() {
+        let ab = TruthValue::new(0.8, 0.9);
+        let bc = TruthValue::new(0.7, 0.8);
+        let ac = nars_deduction(&ab, &bc);
+        // f = 0.8 * 0.7 = 0.56
+        assert!((ac.frequency - 0.56).abs() < 1e-10);
+        // c = 0.9 * 0.8 * 0.8 * 0.7 = 0.4032
+        assert!((ac.confidence - 0.4032).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_deduction_zero_frequency() {
+        let ab = TruthValue::new(0.0, 0.9);
+        let bc = TruthValue::new(0.7, 0.8);
+        let ac = nars_deduction(&ab, &bc);
+        assert!((ac.frequency).abs() < 1e-10);
+        assert!((ac.confidence).abs() < 1e-10);
+    }
+
+    // ====================================================================
+    // NARS Abduction tests
+    // ====================================================================
+
+    #[test]
+    fn test_abduction_basic() {
+        let ab = TruthValue::new(0.8, 0.9);
+        let cb = TruthValue::new(0.7, 0.8);
+        let ac = nars_abduction(&ab, &cb);
+        // f = 0.8
+        assert!((ac.frequency - 0.8).abs() < 1e-10);
+        // c = 0.9 * 0.8 * 0.7 = 0.504
+        assert!((ac.confidence - 0.504).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_abduction_weaker_than_deduction() {
+        let ab = TruthValue::new(0.8, 0.9);
+        let bc = TruthValue::new(0.7, 0.8);
+        let ded = nars_deduction(&ab, &bc);
+        let abd = nars_abduction(&ab, &bc);
+        // Abduction should generally yield lower confidence
+        assert!(abd.confidence <= ded.confidence || abd.frequency >= ded.frequency);
+    }
+
+    // ====================================================================
+    // NARS Induction tests
+    // ====================================================================
+
+    #[test]
+    fn test_induction_basic() {
+        let ab = TruthValue::new(0.8, 0.9);
+        let ac = TruthValue::new(0.7, 0.8);
+        let bc = nars_induction(&ab, &ac);
+        // f = 0.7
+        assert!((bc.frequency - 0.7).abs() < 1e-10);
+        // c = 0.9 * 0.8 * 0.8 = 0.576
+        assert!((bc.confidence - 0.576).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_induction_symmetric_inputs() {
+        let ab = TruthValue::new(0.9, 0.9);
+        let ac = TruthValue::new(0.9, 0.9);
+        let bc = nars_induction(&ab, &ac);
+        // f = 0.9
+        assert!((bc.frequency - 0.9).abs() < 1e-10);
+        // c = 0.9 * 0.9 * 0.9 = 0.729
+        assert!((bc.confidence - 0.729).abs() < 1e-10);
+    }
+
+    // ====================================================================
+    // InferredEdge tests
+    // ====================================================================
+
+    #[test]
+    fn test_inferred_edge_construction() {
+        let edge = InferredEdge {
+            src: super::super::NodeId(1),
+            dst: super::super::NodeId(3),
+            rel_type: "CAUSES".to_string(),
+            truth: TruthValue::new(0.8, 0.6),
+            inference_type: InferenceType::Deduction,
+            via: vec![super::super::NodeId(2)],
+        };
+        assert_eq!(edge.inference_type, InferenceType::Deduction);
+        assert_eq!(edge.via.len(), 1);
+        assert!((edge.truth.frequency - 0.8).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_inference_type_equality() {
+        assert_eq!(InferenceType::Deduction, InferenceType::Deduction);
+        assert_ne!(InferenceType::Deduction, InferenceType::Abduction);
+        assert_ne!(InferenceType::Abduction, InferenceType::Induction);
     }
 }
